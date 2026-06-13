@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Greyscale app icon: live captions (speech bubble) with two transcript
+       lines + one translation line. Distinct dark bg / light foreground. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" ry="232" fill="#1d1d1d"/>
+
+  <!-- speech bubble -->
+  <rect x="206" y="242" width="612" height="430" rx="92" ry="92" fill="#ECECEC"/>
+  <!-- bubble tail (bottom-left, pointing down) -->
+  <path d="M 336 648 L 318 798 L 470 660 Z" fill="#ECECEC"/>
+
+  <!-- transcript lines (dark) -->
+  <rect x="296" y="350" width="432" height="48" rx="24" fill="#2b2b2b"/>
+  <rect x="296" y="436" width="332" height="48" rx="24" fill="#2b2b2b"/>
+  <!-- translation line (mid-grey) -->
+  <rect x="296" y="522" width="404" height="48" rx="24" fill="#8c8c8c"/>
+</svg>

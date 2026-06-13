@@ -1,0 +1,16 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Dependencies & build output
+node_modules/
+dist/
+*.ehpk
+
+# Logs / OS
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/
