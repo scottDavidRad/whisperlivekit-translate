@@ -1,14 +1,14 @@
 {
-  "package_id": "com.intelchen.sonioxtranscribe",
+  "package_id": "com.intelchen.sonioxtranslate",
   "edition": "202601",
-  "name": "Soniox Transcribe",
+  "name": "Soniox Translate",
   "version": "0.1.0",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",
   "permissions": [
-    { "name": "g2-microphone", "desc": "Capture audio from the glasses mic for live transcription." },
-    { "name": "network", "desc": "Stream microphone audio to Soniox for real-time speech-to-text.", "whitelist": ["wss://stt-rt.soniox.com", "https://api.soniox.com"] }
+    { "name": "g2-microphone", "desc": "Capture audio from the glasses mic for live translation." },
+    { "name": "network", "desc": "Stream microphone audio to Soniox for real-time translation.", "whitelist": ["wss://stt-rt.soniox.com", "https://api.soniox.com"] }
   ],
   "supported_languages": ["en"]
 }

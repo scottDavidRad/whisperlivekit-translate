@@ -1,8 +1,12 @@
-# Soniox Transcribe
+# Soniox Translate
 
-**Live captions & real-time translation for the [Even Realities G2](https://www.evenrealities.com) smart glasses.**
+**Real-time translation — with live captions — for the [Even Realities G2](https://www.evenrealities.com) smart glasses.**
 
-Speak — or listen to someone speaking another language — and the words appear on your lens as they're said, with an instant translation right below. Like subtitles for the real world.
+Listen to someone speaking another language and the translation appears on your lens as they speak, with the original transcript right above it. Like subtitles for the real world.
+
+> ## ⚡ Virtually real-time — not seconds behind
+>
+> Even Realities' built-in translation has a **noticeable lag**: the translated words land on your lens a second or two *after* they're spoken. **Soniox Translate streams every word the moment it's said**, so the translation keeps pace with the conversation instead of trailing it. Side by side, ours reads like live subtitles — the stock feature reads like a delayed replay.
 
 Built for [Even Hub](https://hub.evenrealities.com), powered by [Soniox](https://soniox.com) real-time speech AI (60+ languages).
 
@@ -15,9 +19,9 @@ Built for [Even Hub](https://hub.evenrealities.com), powered by [Soniox](https:/
 
 ## Features
 
-- 🎙️ **Live transcription** on the glasses, hands-free
-- 🌍 **Real-time translation** to 24+ target languages (60+ supported by Soniox)
+- ⚡ **Real-time translation** to 24+ target languages (60+ supported by Soniox) — words appear as they're spoken, not a beat behind
 - 🪟 **Translation-first split view** (original on top, translation below) or a clean **full-screen** translation
+- 🎙️ **Live transcription** of the original language too, hands-free
 - 🗣️ **Keep-as-is languages** — translate everything *except* the ones you choose
 - 👥 Optional **speaker labels** (per-speaker icons) and **sentence-by-sentence** layout
 - 🎚️ Tunable display — alignment, text width, line spacing, max lines, and a **bottom-anchored** caption flow that keeps the newest line in a fixed spot
@@ -89,7 +93,7 @@ Everything is configured in the companion Settings panel and persisted per-user 
 
 ```bash
 npm run build                                  # tsc + Vite production build → dist/
-npx @evenrealities/evenhub-cli pack app.json dist -o soniox-transcribe.ehpk
+npx @evenrealities/evenhub-cli pack app.json dist -o soniox-translate.ehpk
 ```
 
 Upload the `.ehpk` on [hub.evenrealities.com](https://hub.evenrealities.com). The production build ships **no API key** — verify with `grep <key> dist/` (should be empty).

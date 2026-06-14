@@ -35,7 +35,7 @@ export function mountUi({ settings, onSave }: UiHandlers) {
   app.innerHTML = `
     <main class="panel">
       <header>
-        <h1>Soniox Transcribe</h1>
+        <h1>Soniox Translate</h1>
         <div id="status" class="status status-connecting">Connecting…</div>
       </header>
 

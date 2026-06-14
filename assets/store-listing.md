@@ -1,24 +1,25 @@
-# Store listing — Soniox Transcribe
+# Store listing — Soniox Translate
 
 ## Short description (tagline)
-Live captions and instant translation, right on your G2 lens.
+Real-time translation, right on your G2 lens — as the words are spoken.
 
 ## Full description
 
-Soniox Transcribe turns your Even Realities G2 into a real-time captioning and
-translation display. Speak — or listen to someone speaking another language —
-and the words appear on your lens as they're said, with an instant translation
-right below.
+Soniox Translate turns your Even Realities G2 into a real-time translation
+display. Listen to someone speaking another language — or speak yourself — and
+the translation appears on your lens as the words are said, with the original
+transcript right above it.
 
-Powered by Soniox's real-time speech AI, it transcribes and translates across
-60+ languages with low latency. Reading a foreign menu, traveling, or talking
-with someone in another language? The original appears up top and the English
-(or any target you choose) appears below — like subtitles for the real world.
+Powered by Soniox's real-time speech AI, it translates across 60+ languages with
+very low latency, so the text keeps pace with the conversation instead of
+trailing behind it. Reading a foreign menu, traveling, or talking with someone
+in another language? The original appears up top and the English (or any target
+you choose) appears below — like subtitles for the real world.
 
 **What it does**
-- Live speech-to-text on the glasses, hands-free
-- Real-time translation to 24+ target languages (60+ supported)
+- Real-time translation to 24+ target languages (60+ supported) — words appear as they're spoken
 - Translation-first split view, or a clean full-screen translation
+- Live transcription of the original language on the glasses, hands-free
 - Keep chosen languages untranslated (e.g. translate everything but your own)
 - Optional speaker labels and sentence-by-sentence layout
 - Tune it your way: alignment, text width, line spacing, max lines, and a
@@ -27,7 +28,7 @@ with someone in another language? The original appears up top and the English
 - Double-tap the temple to exit
 
 **Bring your own key**
-Soniox Transcribe uses your own Soniox API key (free to start at
+Soniox Translate uses your own Soniox API key (free to start at
 console.soniox.com). Your microphone audio streams directly to Soniox under
 your account — so you control your usage and your data. Add your key once in
 Settings and you're live.
