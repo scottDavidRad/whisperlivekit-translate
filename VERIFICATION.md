@@ -10,7 +10,7 @@ The client checks cover the raw PCM handshake, cumulative snapshot replacement, 
 
 The UI checks cover first-run setup, rejected invalid endpoints, normalized settings, an empty endpoint setup state, transcript/English translation labels, safe text rendering, and visible connection errors.
 
-`npm audit` reported **zero vulnerabilities** after updating Vite to **7.3.6**. The repository CI workflow runs installation, tests, build, and packaging. Node.js **22.13 or newer** is required.
+`npm audit` reported **zero vulnerabilities** after updating Vite to **7.3.6**. The repository CI workflow runs installation, tests, build, and packaging. The tests ran with Node.js **26.5.0**. Dependency-compatible runtimes are Node.js **22.22.2+ within 22.x**, **24.15+ within 24.x**, or **26+**.
 
 `npm run build` passed with TypeScript checking and Vite **7.3.6**. `npm run pack` passed and produced `whisperlivekit-translate.ehpk` (**71,879 bytes**, approximately 70 KB).
 

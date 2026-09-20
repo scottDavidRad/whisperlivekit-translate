@@ -8,7 +8,7 @@ The app sends microphone audio to your configured server and displays its output
 
 ## Requirements
 
-- Node.js 22.13 or newer, with npm.
+- Node.js 24.15+ in the 24.x LTS line or Node.js 26+, with npm. Node.js 22.22.2+ in the 22.x LTS line is also supported.
 - Python 3.12 for the local speech server.
 - A computer reachable from the phone, normally on the same private Wi-Fi network.
 - The Even Realities companion app and G2 glasses, or the Even Hub desktop simulator.
