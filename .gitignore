@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+server.env
+.service/
 
 # Dependencies & build output
 node_modules/

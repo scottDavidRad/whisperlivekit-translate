@@ -1,32 +1,37 @@
 # Store listing — Whisper Translate
 
-Draft listing for the WhisperLiveKit fork. Physical G2 verification and deployment-specific network permissions remain required before release.
+Draft listing for this independent WhisperLiveKit application. Verify physical G2 behavior and deployment-specific networking before release.
 
 ## Short description
 
-Live captions and English speech translation on G2, using your own WhisperLiveKit server.
+Automatic English translation, live captions, speaker labels, and optional AI conversation assistance on G2.
 
 ## Full description
 
-Whisper Translate connects your Even Realities G2 microphone to a WhisperLiveKit server that you run. Read live captions in the spoken language, or start the server in native English translation mode to display English text.
+Open the configured app and speak. Translate automatically recognizes supported speech languages and displays English translation. Choose a source language manually only if you want to; Auto remains the default.
 
-The glasses show one text pane, with a matching live text display and connection status on your phone. Adjust text alignment, width, spacing, line count, sentence splitting, and vertical position. Speaker labels are available when the server provides diarization.
+Conversate keeps captions in the spoken language and adds AI cues, optional Prep notes, and an AI summary with action items after you end the session. Choose a configured backend provider: Codex, Grok, Qwen 3.8, or an OpenAI-compatible service.
 
-## Setup required
+The phone follows the familiar Translate and Conversate layout, with source-language controls, session text, settings, and Pause/End buttons. At the native font size, Translate fits eight caption lines; Conversate fits five caption lines and a separate three-line AI cue. Anonymous Speaker 1 / Speaker 2 labels distinguish voices when server diarization is enabled.
 
-You need a computer running WhisperLiveKit, reachable from the phone. Enter its WebSocket address in the app's Settings. No Soniox account or API key is required.
+Captions can clear after 3, 5, 10, or 15 seconds, or stay until replaced. Pause immediately clears the glasses and stops the microphone while retaining text in the phone's current session. End or a double-tap on the temple finishes the session and its Conversate summary. AI cues have separate display timing and an optional automatic pop-up.
 
-The server chooses the model, source language, and speech task. To translate into English, start it with `--direct-english-translation` and select Translation in the app. That selector labels the output; it does not reconfigure the server. This version does not show the original and translation together or translate to arbitrary target languages.
+## Setup and limits
 
-Speech recognition, translation accuracy, and delay depend on the model, computer, and audio quality. Text may change as the model processes more speech.
+The operator provides a reachable WhisperLiveKit server and configures its address in the app once. AI provider authentication is configured only on the backend. A configured installation does not require setup input from the person wearing the glasses.
 
-## Privacy and network
+English is the translation target; simultaneous original/translated streams and reverse translation are not provided. Source-language support depends on the multilingual Whisper model. The default Sortformer model supports up to four anonymous voices per connection. It does not identify people by name.
 
-Microphone audio is streamed to the WhisperLiveKit server address you configure for speech processing. Keep the server private or protect external access with TLS and appropriate access controls. HTTPS app hosting requires a secure `wss://` endpoint.
+Recognition, translation, speaker attribution, and AI assistance can be imperfect. Performance depends on the server and recording; some devices or long conversations can lag. This fork does not integrate with native Even account history.
+
+## Privacy
+
+Audio is processed by the configured WhisperLiveKit server. Conversate sends transcript context and optional Prep notes through that backend to the selected AI provider. Provider credentials stay on the backend. Use private networking and appropriate TLS/access controls.
 
 ## Submission notes
 
-- Configure any required Even Hub host allowlist for the actual server deployment. No Soniox domain is used.
-- Replace historical upstream screenshots with screenshots of this fork before submission.
-- See [VERIFICATION.md](../VERIFICATION.md) for software verification and remaining hardware checks.
-- This fork is based on [Intel Chen's Soniox Translate](https://github.com/intelc/soniox-translate), with its MIT license and copyright retained.
+- Configure required host permissions for the deployed server. No Soniox service is used.
+- Replace historical upstream screenshots with current screenshots before submission.
+- Native simulator translation and the complete Conversate speech/AI software path were verified; physical G2 hardware remains untested.
+- See [VERIFICATION.md](../VERIFICATION.md) for tests, measured results, and unverified hardware/provider limits.
+- Based on [Intel Chen's Soniox Translate](https://github.com/intelc/soniox-translate), with its MIT license and copyright retained.

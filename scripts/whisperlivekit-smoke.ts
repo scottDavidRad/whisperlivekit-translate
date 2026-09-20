@@ -39,7 +39,10 @@ try {
     rejectDone(error)
   }, 120_000)
   try {
-    client = startSttStream({ serverUrl: url, splitSentences: true }, snapshot => {
+    client = startSttStream({ serverUrl: url, splitSentences: true, speakerLabels: process.env.SPEAKER_LABELS === '1',
+      sourceLanguage: process.env.SOURCE_LANGUAGE,
+      task: process.env.STT_TASK === 'translate' || process.env.STT_TASK === 'transcribe' ? process.env.STT_TASK : undefined,
+    }, snapshot => {
       snapshots++
       if (snapshot.interimText.trim()) interimSnapshots++
       finalText = snapshot.finalText.trim()
@@ -59,7 +62,10 @@ try {
     if (process.env.EXPECT_TEXT && !new RegExp(process.env.EXPECT_TEXT, 'i').test(finalText)) {
       throw new Error(`Transcript did not match EXPECT_TEXT: ${finalText}`)
     }
-    console.log(JSON.stringify({ passed: true, url, snapshots, interimSnapshots, finalText }, null, 2))
+    const speakers = new Set([...finalText.matchAll(/Speaker (\d+):/g)].map(match => match[1])).size
+    const expectedSpeakers = Number(process.env.EXPECT_SPEAKERS || 0)
+    if (speakers < expectedSpeakers) throw new Error(`Expected at least ${expectedSpeakers} speakers, received ${speakers}: ${finalText}`)
+    console.log(JSON.stringify({ passed: true, url, snapshots, interimSnapshots, speakers, finalText }, null, 2))
   } finally { clearTimeout(timeout) }
 } finally {
   client?.close()

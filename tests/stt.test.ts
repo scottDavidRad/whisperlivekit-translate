@@ -63,7 +63,69 @@ test('does not duplicate pending diarization included in WLK 0.2.19 lines', () =
 test('renders silence and speaker IDs without control text', () => {
   const socket = start({ speakerLabels: true, splitSentences: true }); ready(socket)
   socket.message({ lines: [{ text: 'One', speaker: 1 }, { text: '', speaker: -2 }, { text: 'Two', speaker: 2 }] })
-  assert.equal(snapshots.at(-1)!.finalText, '● One\n■ Two')
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: One\nSpeaker 2: Two')
+})
+
+test('speaker changes get readable turns even with sentence splitting disabled', () => {
+  const socket = start({ speakerLabels: true, splitSentences: false }); ready(socket)
+  socket.message({ lines: [
+    { text: 'First.', speaker: 3 },
+    { text: 'Still first.', speaker: 3 },
+    { text: 'Second.', speaker: 1 },
+    { text: 'First again.', speaker: 3 },
+  ] })
+  assert.equal(snapshots.at(-1)!.finalText,
+    'Speaker 1: First. Still first.\nSpeaker 2: Second.\nSpeaker 1: First again.')
+})
+
+test('holds delayed diarization text unassigned and replaces it when attribution arrives', () => {
+  const socket = start({ speakerLabels: true }); ready(socket)
+  socket.message({
+    lines: [{ text: 'Hello.', speaker: 1 }, { text: ' New words.', speaker: 1 }],
+    buffer_diarization: ' New words.',
+    buffer_transcription: 'More',
+  })
+  assert.deepEqual(snapshots.at(-1), {
+    finalText: 'Speaker 1: Hello.',
+    interimText: '\nSpeaker pending: New words. More',
+    finished: false,
+  })
+  socket.message({ lines: [{ text: 'Hello.', speaker: 1 }, { text: ' New words. More.', speaker: 2 }] })
+  assert.deepEqual(snapshots.at(-1), {
+    finalText: 'Speaker 1: Hello.\nSpeaker 2: New words. More.', interimText: '', finished: false,
+  })
+})
+
+test('pending diarization can span multiple lines or part of a line', () => {
+  const socket = start({ speakerLabels: true }); ready(socket)
+  socket.message({
+    lines: [{ text: 'Known. Pending one.', speaker: 2 }, { text: 'Pending two.', speaker: 1 }],
+    buffer_diarization: 'Pending one.  Pending two.',
+  })
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: Known.')
+  assert.equal(snapshots.at(-1)!.interimText, '\nSpeaker pending: Pending one.  Pending two.')
+})
+
+test('speaker revisions replace earlier attribution without duplicating words', () => {
+  const socket = start({ speakerLabels: true }); ready(socket)
+  socket.message({ lines: [{ text: 'One.', speaker: 1 }, { text: 'Two.', speaker: 2 }] })
+  socket.message({ lines: [{ text: 'One. Two.', speaker: 1 }] })
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: One. Two.')
+})
+
+test('unassigned speaker values are never represented as identified voices', () => {
+  const socket = start({ speakerLabels: true }); ready(socket)
+  socket.message({ lines: [null, { text: 'Unassigned.', speaker: -1 }, { text: 'Still unknown.', speaker: 0 }, { text: 'Known.', speaker: 2 }] })
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker pending: Unassigned. Still unknown.\nSpeaker 1: Known.')
+})
+
+test('reconnect does not reuse old speaker identities for a fresh backend session', () => {
+  const socket = start({ speakerLabels: true }); ready(socket)
+  socket.message({ lines: [{ text: 'Before.', speaker: 1 }] })
+  socket.close(); mock.timers.tick(500)
+  const next = FakeSocket.sockets.at(-1)!; ready(next)
+  next.message({ lines: [{ text: 'After.', speaker: 1 }] })
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: Before.\nSpeaker 2: After.')
 })
 
 test('rejects non-PCM server before audio leaves and never retries fatal errors', () => {
@@ -135,4 +197,36 @@ test('reports server errors and silent handshake timeouts', () => {
   assert.match(errors[0].message, /inference failed/)
   socket = start(); socket.open(); mock.timers.tick(15_000)
   assert.match(errors[1].message, /PCM configuration/)
+})
+
+test('requests manual input and task and requires the backend to acknowledge both', () => {
+  const socket = start({ sourceLanguage: 'ru', task: 'translate' })
+  assert.equal(new URL(socket.url).searchParams.get('language'), 'ru')
+  assert.equal(new URL(socket.url).searchParams.get('task'), 'translate')
+  socket.open()
+  socket.message({ type: 'config', useAudioWorklet: true, source_language: 'ru', translation_mode: 'english' })
+  assert.equal(statuses.at(-1), 'live')
+  assert.deepEqual(errors, [])
+})
+
+test('rejects an ignored manual language before sending queued speech', () => {
+  const socket = start({ sourceLanguage: 'ru' })
+  client!.sendPcm(new Uint8Array([1, 2]))
+  socket.open()
+  socket.message({ type: 'config', useAudioWorklet: true, source_language: 'auto' })
+  assert.equal(errors.length, 1)
+  assert.deepEqual(socket.sent, [])
+})
+
+test('Conversate requires source transcription rather than an English-only stream', () => {
+  const socket = start({ sourceLanguage: 'auto', task: 'transcribe' })
+  socket.open()
+  socket.message({ type: 'config', useAudioWorklet: true, source_language: 'auto', translation_mode: 'english' })
+  assert.match(errors[0].message, /speech task/)
+  assert.equal(statuses.includes('live'), false)
+})
+
+test('unsupported manual language is rejected before opening any socket', () => {
+  assert.throws(() => start({ sourceLanguage: 'made-up' }), /Unsupported input/)
+  assert.equal(FakeSocket.sockets.length, 0)
 })

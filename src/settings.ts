@@ -1,11 +1,23 @@
+import { isSourceLanguage } from './languages'
+
 // Per-user display and self-hosted WhisperLiveKit connection settings.
 // Stored through the SDK's localStorage in the Even companion app.
 
 export type OutputMode = 'transcript' | 'translation'
+export type AppMode = 'translate' | 'conversate'
 
 export interface AppSettings {
+  appMode: AppMode
+  aiProvider: 'codex' | 'grok' | 'openai-compatible' | 'qwen'
+  prepNotes: string
+  cueAutoShow: boolean
+  cueDurationSeconds: number
+  /** Zero keeps captions until they are replaced. */
+  captionHoldSeconds: number
   /** WebSocket URL of the user's WhisperLiveKit /asr endpoint. */
   serverUrl: string
+  /** Auto detects speech; a language code opts into manual recognition. */
+  sourceLanguage: string
   /** Selects which server output to show in the main pane. */
   outputMode: OutputMode
   /** Put each completed sentence on its own line. */
@@ -25,10 +37,17 @@ export interface AppSettings {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  appMode: 'translate',
+  aiProvider: 'codex',
+  prepNotes: '',
+  cueAutoShow: true,
+  cueDurationSeconds: 10,
+  captionHoldSeconds: 5,
   serverUrl: '',
-  outputMode: 'transcript',
+  sourceLanguage: 'auto',
+  outputMode: 'translation',
   splitSentences: true,
-  speakerLabels: false,
+  speakerLabels: true,
   align: 'left',
   vAlign: 'bottom',
   lineGap: 0,
@@ -77,6 +96,13 @@ export function mergeSettings(raw: string | null | undefined): AppSettings {
       // An invalid saved endpoint returns the app to setup.
     }
   }
+  if (isSourceLanguage(parsed.sourceLanguage)) settings.sourceLanguage = parsed.sourceLanguage
+  if (parsed.appMode === 'translate' || parsed.appMode === 'conversate') settings.appMode = parsed.appMode
+  if (parsed.aiProvider === 'codex' || parsed.aiProvider === 'grok' || parsed.aiProvider === 'openai-compatible' || parsed.aiProvider === 'qwen') settings.aiProvider = parsed.aiProvider
+  if (typeof parsed.prepNotes === 'string') settings.prepNotes = parsed.prepNotes.slice(0, 5000)
+  if (typeof parsed.cueAutoShow === 'boolean') settings.cueAutoShow = parsed.cueAutoShow
+  if (typeof parsed.cueDurationSeconds === 'number' && [5, 10, 15, 30].includes(parsed.cueDurationSeconds)) settings.cueDurationSeconds = parsed.cueDurationSeconds
+  if (typeof parsed.captionHoldSeconds === 'number' && [0, 3, 5, 10, 15].includes(parsed.captionHoldSeconds)) settings.captionHoldSeconds = parsed.captionHoldSeconds
   if (parsed.outputMode === 'transcript' || parsed.outputMode === 'translation') {
     settings.outputMode = parsed.outputMode
   }

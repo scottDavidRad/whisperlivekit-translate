@@ -19,6 +19,7 @@ const url = process.env.WHISPERLIVEKIT_URL || 'ws://127.0.0.1:8000/asr'
 const speech = process.argv[2] || 'The quick brown fox jumps over the lazy dog.'
 const expected = process.env.EXPECT_TEXT ? new RegExp(process.env.EXPECT_TEXT, 'is') : /\S/
 const outputMode = process.env.OUTPUT_MODE === 'translation' ? 'translation' : 'transcript'
+const appMode = process.env.APP_MODE === 'conversate' ? 'conversate' : 'translate'
 const temp = mkdtempSync(join(tmpdir(), 'whisperlivekit-app-smoke-'))
 const dom = new JSDOM('<!doctype html><html><head></head><body><div id="app"></div></body></html>', {
   url: 'http://localhost:5173',
@@ -32,7 +33,8 @@ let audioEvents = 0
 let pcmBytes = 0
 let finishFrames = 0
 let finishAcknowledgments = 0
-let savedSettings = JSON.stringify({ ...DEFAULT_SETTINGS, serverUrl: url, outputMode })
+let savedSettings = JSON.stringify({ ...DEFAULT_SETTINGS, serverUrl: url, outputMode, appMode,
+  sourceLanguage: process.env.SOURCE_LANGUAGE || 'auto', aiProvider: process.env.AI_PROVIDER || 'codex' })
 const globals = new Map()
 
 function installGlobal(name, value) {
@@ -113,10 +115,10 @@ try {
   await import('../src/main.ts')
   await until(() => microphone && dom.window.document.querySelector('#status')?.textContent === 'Live', 'app connected and microphone enabled')
   const startup = calls.find(call => call.method === 'createStartUpPageContainer')
-  assert.equal(startup?.page.containerTotalNum, 1, 'App creates one glasses pane.')
+  assert.equal(startup?.page.containerTotalNum, appMode === 'conversate' ? 3 : 2, 'App creates the native caption layout and an optional AI cue pane.')
   assert.equal(dom.window.document.querySelectorAll('section.pane').length, 1, 'Phone displays one output pane.')
   assert.equal(dom.window.document.querySelector('#serverUrl').value, url)
-  assert.equal(dom.window.document.querySelector('#tl-label').textContent, outputMode === 'translation' ? 'Translation · English' : 'Transcript')
+  assert.equal(dom.window.document.querySelector('#tl-label').textContent, appMode === 'translate' && outputMode === 'translation' ? 'Translation · English' : 'Transcript')
   assert.equal(callbacks.size, 1, 'App subscribes to Even events.')
 
   console.log(`Streaming ${(pcm.length / 32000).toFixed(1)} seconds through SDK audio events and main.ts to ${url}`)
@@ -128,27 +130,43 @@ try {
   assert.equal(pcmBytes, pcm.length, 'All injected PCM reaches the real speech socket.')
   await until(() => expected.test(phoneText()), 'recognized speech appears in phone UI')
   await until(() => upgrades.some(update => expected.test(update.content)), 'recognized speech reaches a glasses text update')
+  if (process.env.EXPECT_CUE === '1') {
+    await until(() => dom.window.document.querySelector('#show-cue')?.disabled === false,
+      'a real AI cue appears during the conversation', 30_000)
+    await until(() => upgrades.some(update => update.containerID === 3 && update.content.trim()),
+      'the real AI cue reaches the glasses', 10_000)
+  }
 
-  emit('sysEvent', { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT })
+  if (appMode === 'conversate') dom.window.document.querySelector('#session-end').click()
+  else emit('sysEvent', { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT })
   await until(() => !microphone, 'foreground exit turns the microphone off')
   await until(() => finishAcknowledgments > 0, 'foreground exit gracefully flushes WhisperLiveKit')
   await until(() => expected.test(phoneText()), 'recognized speech appears in phone UI')
   await until(() => upgrades.some(update => expected.test(update.content)), 'recognized speech reaches a glasses text update')
   assert.equal(finishFrames, 1, 'One empty binary frame ends the recording.')
+  if (process.env.EXPECT_SUMMARY === '1') {
+    await until(() => Boolean(dom.window.document.querySelector('#summary-text')?.textContent?.trim()), 'real AI summary appears after draining speech', 60_000)
+  }
 
+  const speakerCount = new Set([...phoneText().matchAll(/Speaker (\d+):/g)].map(match => match[1])).size
+  assert.ok(speakerCount >= Number(process.env.EXPECT_SPEAKERS || 0), `Expected ${process.env.EXPECT_SPEAKERS} speakers, received ${speakerCount}.`)
   const lastUpgrade = upgrades.at(-1)
   console.log(JSON.stringify({
     passed: true,
     environment: 'jsdom with native microphone and glasses bridge stubbed; physical G2 not tested',
     serverUrl: url,
     outputMode,
+    appMode,
     audioEvents,
+    speakerCount,
     pcmBytes,
     finishFrames,
     finishAcknowledgments,
     phoneText: phoneText().trim(),
     glassesText: lastUpgrade?.content?.trim(),
     glassesUpdates: upgrades.length,
+    aiCue: appMode === 'conversate' ? dom.window.document.querySelector('#cue-text')?.textContent : undefined,
+    aiSummary: appMode === 'conversate' ? dom.window.document.querySelector('#summary-text')?.textContent : undefined,
     microphoneStopped: !microphone,
   }, null, 2))
 } finally {

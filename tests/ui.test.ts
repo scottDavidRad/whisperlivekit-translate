@@ -2,13 +2,15 @@ import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, test } from 'node:test'
 import { JSDOM } from 'jsdom'
 import { DEFAULT_SETTINGS, type AppSettings } from '../src/settings.ts'
-import { mountUi, setOutputMode, setStatus, setTranslation } from '../src/ui.ts'
+import { mountUi, setOutputMode, setStatus, setTranslation, setSessionState, setAppMode, setConversationCue, setConversationStatus, setConversationSummary, type SessionAction } from '../src/ui.ts'
 
 // The SDK bridge is not needed to exercise the phone settings and text mirror.
 // Each test gets a fresh document, while interactions use the actual UI handlers.
 describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
   let dom: JSDOM
   let saves: AppSettings[]
+  let sessionActions: SessionAction[]
+  let cueActions: number
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
 
   beforeEach(() => {
@@ -17,7 +19,9 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
     })
     Object.defineProperty(globalThis, 'document', { configurable: true, value: dom.window.document })
     saves = []
-    mountUi({ settings: { ...DEFAULT_SETTINGS }, onSave: next => saves.push(next) })
+    sessionActions = []
+    cueActions = 0
+    mountUi({ settings: { ...DEFAULT_SETTINGS }, onSave: next => saves.push(next), onSessionAction: action => sessionActions.push(action), onCueAction: () => cueActions++ })
   })
 
   afterEach(() => {
@@ -39,12 +43,14 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
   test('first run opens connection setup and explains the server requirements', () => {
     assert.equal(element<HTMLDetailsElement>('#settings').open, true)
     assert.equal(element<HTMLInputElement>('#serverUrl').value, '')
-    assert.equal(element<HTMLSelectElement>('#outputMode').value, 'transcript')
-    assert.equal(element('#tl-label').textContent, 'Transcript')
+    assert.equal(element<HTMLSelectElement>('#outputMode').value, 'translation')
+    assert.equal(element('#tl-label').textContent, 'Translation · English')
+    assert.equal(element<HTMLInputElement>('#speakers').checked, true)
+    assert.match(element('#language-hint').textContent ?? '', /Auto detects/)
     assert.equal(dom.window.document.querySelectorAll('section.pane').length, 1)
     assert.equal(dom.window.document.querySelector('input[type="password"]'), null)
     assert.match(element('#server-hint').textContent ?? '', /LAN address/)
-    assert.match(element('#settings').textContent ?? '', /--direct-english-translation/)
+    assert.match(element('#language-hint').textContent ?? '', /Conversate keeps the original speech/)
     assert.equal(saves.length, 0)
   })
 
@@ -76,7 +82,7 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
     element<HTMLInputElement>('#serverUrl').value = '  WSS://EXAMPLE.COM:443/asr  '
     element<HTMLSelectElement>('#outputMode').value = 'translation'
     element<HTMLInputElement>('#split').checked = false
-    element<HTMLInputElement>('#speakers').checked = true
+    element<HTMLInputElement>('#speakers').checked = false
     element<HTMLSelectElement>('#align').value = 'center'
     element<HTMLSelectElement>('#valign').value = 'top'
     element<HTMLSelectElement>('#linegap').value = '2'
@@ -85,10 +91,12 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
     save()
 
     assert.deepEqual(saves, [{
+      ...DEFAULT_SETTINGS,
       serverUrl: 'wss://example.com/asr',
+      sourceLanguage: 'auto',
       outputMode: 'translation',
       splitSentences: false,
-      speakerLabels: true,
+      speakerLabels: false,
       align: 'center',
       vAlign: 'top',
       lineGap: 2,
@@ -121,11 +129,12 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
     assert.equal(element('#tl-final').textContent, finalText)
     assert.equal(element('#tl-interim').textContent, interimText)
     assert.equal(element('.pane-body').querySelector('img, script'), null)
-    assert.equal(element('#tl-final').children.length, 0)
+    assert.equal(element('#tl-final').querySelector('img, script'), null)
     assert.equal(element('#tl-interim').children.length, 0)
 
     setTranslation('Updated speech.', '')
-    assert.equal(element('.pane-body').textContent, 'Updated speech.')
+    assert.equal(element('#tl-final').textContent, 'Updated speech.')
+    assert.equal(element('#empty-transcript').hidden, true)
   })
 
   test('connection failures are readable on the page without hovering over a badge', () => {
@@ -143,4 +152,147 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
     assert.equal(details.textContent, 'Microphone live')
     assert.equal(element('#status').textContent, 'Live')
   })
+
+  test('Auto starts selected with no start action and a read-only English target', () => {
+    assert.equal(element('h1').textContent, 'Translate')
+    assert.equal(element<HTMLSelectElement>('#sourceLanguage').value, 'auto')
+    assert.equal(element('#target-language').textContent, 'English')
+    assert.equal(element('#target-language').tagName, 'SPAN')
+    assert.match(element('#session-toggle').textContent ?? '', /Pause/)
+    assert.deepEqual(sessionActions, [])
+  })
+
+  test('manual source selection saves immediately and can return to Auto', () => {
+    const source = element<HTMLSelectElement>('#sourceLanguage')
+    source.value = 'ru'
+    source.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+    assert.equal(saves.at(-1)?.sourceLanguage, 'ru')
+    assert.equal(saves.at(-1)?.outputMode, 'translation')
+    assert.match(element('#source-hint').textContent ?? '', /Russian/)
+    source.value = 'auto'
+    source.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+    assert.equal(saves.at(-1)?.sourceLanguage, 'auto')
+    assert.match(element('#source-hint').textContent ?? '', /Automatic/)
+  })
+
+  test('settings button opens and closes the actual settings panel', () => {
+    const button = element<HTMLButtonElement>('#settings-toggle')
+    button.click()
+    assert.equal(element<HTMLDetailsElement>('#settings').open, false)
+    assert.equal(button.getAttribute('aria-expanded'), 'false')
+    button.click()
+    assert.equal(element<HTMLDetailsElement>('#settings').open, true)
+    assert.equal(button.getAttribute('aria-expanded'), 'true')
+  })
+
+  test('Pause, Resume, End, and Start invoke session actions without pretending they completed', () => {
+    const toggle = element<HTMLButtonElement>('#session-toggle')
+    const end = element<HTMLButtonElement>('#session-end')
+    toggle.click()
+    assert.deepEqual(sessionActions, ['pause'])
+    assert.match(toggle.textContent ?? '', /Pause/)
+    setSessionState('paused')
+    assert.match(toggle.textContent ?? '', /Resume/)
+    assert.equal(element('#status').textContent, 'Paused')
+    toggle.click()
+    assert.deepEqual(sessionActions, ['pause', 'resume'])
+    setSessionState('listening')
+    end.click()
+    assert.equal(sessionActions.at(-1), 'end')
+    setSessionState('ended')
+    assert.equal(end.disabled, true)
+    assert.match(toggle.textContent ?? '', /Start/)
+    end.click()
+    assert.deepEqual(sessionActions, ['pause', 'resume', 'end'])
+    toggle.click()
+    assert.equal(sessionActions.at(-1), 'start')
+  })
+
+  test('speaker rows preserve exact snapshot text for copying and integration consumers', () => {
+    const text = 'Speaker 1: Hello.\nSpeaker 2: Good morning.'
+    setTranslation(text, '\nSpeaker pending: Next')
+    assert.equal(element('#tl-final').textContent, text)
+    assert.equal(element('#tl-interim').textContent, '\nSpeaker pending: Next')
+    assert.equal(element('#tl-final').querySelectorAll('.speaker-label').length, 2)
+    setTranslation('', '')
+    assert.equal(element('#tl-final').textContent, '')
+    assert.equal(element('#empty-transcript').hidden, false)
+  })
+
+
+  test('Conversate mode is optional, saves immediately, and shows cues without inventing a target language', () => {
+    assert.equal(element('#conversation-panel').hidden, true)
+    element<HTMLButtonElement>('#mode-conversate').click()
+    assert.equal(saves.at(-1)?.appMode, 'conversate')
+    assert.equal(element('h1').textContent, 'Conversate')
+    assert.equal(element('#conversation-panel').hidden, false)
+    assert.equal(element('#conversation-settings').hidden, false)
+    assert.equal(element('#source-label').textContent, 'Speech language')
+    assert.ok(element('.language-pair').classList.contains('source-only'))
+    assert.equal(element('#mode-conversate').getAttribute('aria-pressed'), 'true')
+    element<HTMLButtonElement>('#mode-translate').click()
+    assert.equal(saves.at(-1)?.appMode, 'translate')
+    assert.equal(element('#conversation-panel').hidden, true)
+  })
+
+  test('real AI cues, provider status, and summary are rendered safely and the cue action is explicit', () => {
+    setAppMode('conversate')
+    const cueButton = element<HTMLButtonElement>('#show-cue')
+    assert.equal(cueButton.disabled, true)
+    setConversationStatus('AI provider is not configured.')
+    assert.equal(element('#conversation-status').textContent, 'AI provider is not configured.')
+    setConversationCue({ kind: 'Suggestion', text: '<img src=x> Ask about the deadline.' })
+    assert.equal(element('#cue-text').textContent, '<img src=x> Ask about the deadline.')
+    assert.equal(element('#cue-text').querySelector('img'), null)
+    assert.equal(cueButton.disabled, false)
+    cueButton.click()
+    assert.equal(cueActions, 1)
+    setConversationSummary('We agreed to <review> the plan.', ['Confirm timing.', '<script>bad()</script>'])
+    assert.equal(element('#conversation-summary').hidden, false)
+    assert.equal(element('#summary-text').textContent, 'We agreed to <review> the plan.')
+    assert.equal(element('#action-items').children.length, 2)
+    assert.equal(element('#action-items').querySelector('script'), null)
+    setConversationCue(null)
+    assert.equal(cueButton.disabled, true)
+    setConversationSummary('', [])
+    assert.equal(element('#conversation-summary').hidden, true)
+  })
+
+  test('prep notes, cue preferences, and both caption retention options save independently', () => {
+    element<HTMLButtonElement>('#mode-conversate').click()
+    const prep = element<HTMLTextAreaElement>('#prepNotes')
+    assert.equal(prep.maxLength, 5000)
+    prep.value = 'Discuss the project timeline.'
+    element<HTMLInputElement>('#cueAutoShow').checked = false
+    element<HTMLSelectElement>('#cueDuration').value = '30'
+    const hold = element<HTMLSelectElement>('#captionHold')
+    assert.equal(hold.value, '5')
+    assert.equal(hold.options[0].text, 'Stay until replaced')
+    hold.value = '0'
+    save()
+    assert.equal(saves.at(-1)?.prepNotes, 'Discuss the project timeline.')
+    assert.equal(saves.at(-1)?.cueAutoShow, false)
+    assert.equal(saves.at(-1)?.cueDurationSeconds, 30)
+    assert.equal(saves.at(-1)?.captionHoldSeconds, 0)
+    hold.value = '15'
+    prep.value = 'a'.repeat(5100)
+    save()
+    assert.equal(saves.at(-1)?.captionHoldSeconds, 15)
+    assert.equal(saves.at(-1)?.prepNotes.length, 5000)
+  })
+
+
+  test('Conversate provider choices persist without exposing credential inputs', () => {
+    element<HTMLButtonElement>('#mode-conversate').click()
+    const provider = element<HTMLSelectElement>('#aiProvider')
+    assert.equal(provider.value, 'codex')
+    assert.deepEqual(Array.from(provider.options, option => option.text), ['Codex', 'Grok', 'Qwen 3.8', 'OpenAI-compatible'])
+    for (const value of ['grok', 'qwen', 'openai-compatible', 'codex']) {
+      provider.value = value
+      save()
+      assert.equal(saves.at(-1)?.aiProvider, value)
+    }
+    assert.equal(dom.window.document.querySelector('input[type="password"]'), null)
+  })
+
 })

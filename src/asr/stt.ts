@@ -1,8 +1,8 @@
 // WhisperLiveKit 0.2.19 /asr client. Server must run with --pcm-input.
 // Binary PCM s16le, 16 kHz mono; server responses replace cumulative snapshots.
 import { validateServerUrl } from '../settings.ts'
+import { isSourceLanguage } from '../languages.ts'
 
-const SPEAKER_ICONS = ['●', '■', '★', '▲', '♦', '♥', '♣', '♠']
 const MAX_PENDING_BYTES = 160_000
 const BACKPRESSURE_BYTES = 256_000
 const MAX_TEXT = 100_000
@@ -10,6 +10,11 @@ const MAX_TEXT = 100_000
 export type SttStatus = 'connecting' | 'live' | 'reconnecting' | 'closed'
 export interface SttOptions {
   serverUrl: string
+  /** Auto is the default app mode; a code selects manual input recognition. */
+  sourceLanguage?: string
+  task?: 'translate' | 'transcribe'
+  /** Continue anonymous numbering when the app starts a fresh backend session. */
+  firstSpeaker?: number
   splitSentences?: boolean
   /** Display speaker IDs supplied by a server running with --diarization. */
   speakerLabels?: boolean
@@ -30,6 +35,8 @@ interface WhisperLine { text?: string; speaker?: number }
 interface WhisperResponse {
   type?: string
   useAudioWorklet?: boolean
+  source_language?: string
+  translation_mode?: 'english' | 'transcript'
   status?: string
   error?: string
   lines?: WhisperLine[]
@@ -43,14 +50,37 @@ function joinText(a: string, b: string, separator = ' '): string {
   return a + (/\s$/.test(a) || /^\s/.test(b) ? '' : separator) + b
 }
 
+function normalizeText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/** Remove a duplicated pending suffix without assigning it a speaker yet. */
+function withoutPendingSuffix(lines: WhisperLine[], keepCharacters: number): WhisperLine[] {
+  let offset = 0
+  return lines.flatMap((line, index) => {
+    const text = normalizeText(line.text || '')
+    const start = offset + (index ? 1 : 0)
+    offset = start + text.length
+    const retained = text.slice(0, Math.max(0, keepCharacters - start)).trimEnd()
+    return retained ? [{ ...line, text: retained }] : []
+  })
+}
+
 export function startSttStream(
   opts: SttOptions,
   onSnapshot: (snapshot: SttSnapshot) => void,
   onError?: (error: unknown) => void,
   onStatus?: (status: SttStatus) => void,
 ): SttClient {
-  const url = validateServerUrl(opts.serverUrl)
-  if (!url) throw new Error('Set your WhisperLiveKit server URL in Settings.')
+  const configuredUrl = validateServerUrl(opts.serverUrl)
+  if (!configuredUrl) throw new Error('Set your WhisperLiveKit server URL in Settings.')
+  const connectionUrl = new URL(configuredUrl)
+  if (opts.sourceLanguage !== undefined) {
+    if (!isSourceLanguage(opts.sourceLanguage)) throw new Error('Unsupported input language.')
+    connectionUrl.searchParams.set('language', opts.sourceLanguage)
+  }
+  if (opts.task) connectionUrl.searchParams.set('task', opts.task)
+  const url = connectionUrl.href
   if (globalThis.location?.protocol === 'https:' && url.startsWith('ws:')) {
     throw new Error('An HTTPS app requires a secure wss:// WhisperLiveKit server.')
   }
@@ -67,7 +97,8 @@ export function startSttStream(
   let interimText = ''
   let pendingBytes = 0
   const pending: Uint8Array[] = []
-  const speakers = new Map<number, string>()
+  const speakers = new Map<number, number>()
+  let nextSpeaker = Number.isSafeInteger(opts.firstSpeaker) && opts.firstSpeaker! > 0 ? opts.firstSpeaker! : 1
 
   function emit(finished = false) {
     onSnapshot({ finalText: joinText(history, sessionFinal, '\n').slice(-MAX_TEXT), interimText, finished })
@@ -94,16 +125,21 @@ export function startSttStream(
   }
   function formatLines(lines: WhisperLine[]) {
     let text = ''
-    let lastSpeaker: number | undefined
+    let lastSpeaker: number | null | undefined
     for (const line of lines) {
-      if (line.speaker === -2 || typeof line.text !== 'string' || !line.text.trim()) continue
-      let part = line.text.trim()
-      if (opts.speakerLabels && typeof line.speaker === 'number' && line.speaker >= 0 && line.speaker !== lastSpeaker) {
-        if (!speakers.has(line.speaker)) speakers.set(line.speaker, SPEAKER_ICONS[speakers.size % SPEAKER_ICONS.length])
-        part = `${speakers.get(line.speaker)} ${part}`
-        lastSpeaker = line.speaker
+      let part = line.text!.trim()
+      const speaker = typeof line.speaker === 'number' && Number.isInteger(line.speaker) && line.speaker > 0
+        ? line.speaker : null
+      const speakerChanged = opts.speakerLabels && speaker !== lastSpeaker
+      if (speakerChanged) {
+        if (speaker === null) part = `Speaker pending: ${part}`
+        else {
+          if (!speakers.has(speaker)) speakers.set(speaker, nextSpeaker++)
+          part = `Speaker ${speakers.get(speaker)}: ${part}`
+        }
+        lastSpeaker = speaker
       }
-      text = joinText(text, part, opts.splitSentences ? '\n' : ' ')
+      text = joinText(text, part, opts.splitSentences || speakerChanged ? '\n' : ' ')
     }
     return text.slice(-MAX_TEXT)
   }
@@ -134,6 +170,14 @@ export function startSttStream(
           fail('Restart WhisperLiveKit with --pcm-input (16 kHz mono PCM is required).')
           return
         }
+        if (opts.sourceLanguage !== undefined && response.source_language !== opts.sourceLanguage) {
+          fail('The server did not confirm the selected input mode. Use this fork’s WhisperLiveKit server and reconnect.')
+          return
+        }
+        if (opts.task && response.translation_mode !== (opts.task === 'translate' ? 'english' : 'transcript')) {
+          fail('The server did not confirm the requested speech task. Update the included backend.')
+          return
+        }
         clearTimeout(connectionTimer)
         ready = true
         attempts = 0
@@ -150,14 +194,23 @@ export function startSttStream(
         return
       }
       if (Array.isArray(response.lines)) {
-        sessionFinal = formatLines(response.lines)
+        const lines = response.lines.filter(line => line && line.speaker !== -2 && typeof line.text === 'string' && line.text.trim())
         // WLK 0.2.19 can include pending diarization in both lines and buffer.
-        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
-        const diarization = response.buffer_diarization || ''
-        const lineText = normalize(response.lines.map(line => line.text || '').join(' '))
-        const extra = lineText.endsWith(normalize(diarization)) ? '' : diarization
-        interimText = joinText(extra, response.buffer_transcription || '')
-        if (interimText && (history || sessionFinal) && !/^\s/.test(interimText)) interimText = ' ' + interimText
+        // Its fallback speaker 1 on that suffix is not a confirmed attribution.
+        const diarization = typeof response.buffer_diarization === 'string' ? response.buffer_diarization : ''
+        const transcription = typeof response.buffer_transcription === 'string' ? response.buffer_transcription : ''
+        const pendingText = normalizeText(diarization)
+        const lineText = normalizeText(lines.map(line => line.text).join(' '))
+        const duplicated = !!pendingText && lineText.endsWith(pendingText)
+        const labeledLines = opts.speakerLabels && duplicated
+          ? withoutPendingSuffix(lines, lineText.length - pendingText.length)
+          : lines
+        sessionFinal = formatLines(labeledLines)
+        const extra = duplicated && !opts.speakerLabels ? '' : diarization
+        interimText = joinText(extra, transcription)
+        if (opts.speakerLabels && interimText.trim()) {
+          interimText = `${history || sessionFinal ? '\n' : ''}Speaker pending: ${interimText.trim()}`
+        } else if (interimText && (history || sessionFinal) && !/^\s/.test(interimText)) interimText = ' ' + interimText
         emit()
       }
     })
@@ -175,6 +228,8 @@ export function startSttStream(
       history = joinText(history, sessionFinal, '\n').slice(-MAX_TEXT)
       sessionFinal = ''
       interimText = ''
+      // A fresh backend session cannot recognize identities from the old one.
+      // Preserve distinct display labels instead of reusing Speaker 1.
       speakers.clear()
       emit()
       onStatus?.('reconnecting')
