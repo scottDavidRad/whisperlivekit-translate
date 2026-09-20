@@ -106,6 +106,7 @@ export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHa
             Conversate keeps the original speech.</p>
         </div>
         <div class="group-title">Glasses display</div>
+        <p class="hint">Glasses show confirmed speech on steady pages. Live wording stays on the phone.</p>
         <div class="row">
           <div class="field"><label for="align">Alignment</label><select id="align">
             <option value="left"${settings.align === 'left' ? ' selected' : ''}>Left</option>
@@ -128,7 +129,7 @@ export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHa
         <div class="field">
           <label for="captionHold">Clear captions after</label>
           <select id="captionHold">${[0, 3, 5, 10, 15].map(n => opt(n, n === 0 ? 'Stay until replaced' : `${n} seconds`, settings.captionHoldSeconds)).join('')}</select>
-          <p class="hint">After the last caption update. Pausing clears the glasses immediately; phone history stays.</p>
+          <p class="hint">After the last displayed caption update. Pausing clears the glasses immediately; phone history stays.</p>
         </div>
         <label class="check"><input id="split" type="checkbox"${settings.splitSentences ? ' checked' : ''}/> Split sentences onto new lines</label>
         <label class="check"><input id="speakers" type="checkbox"${settings.speakerLabels ? ' checked' : ''}/> Identify speakers</label>

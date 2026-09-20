@@ -10,6 +10,7 @@ import { getTextWidth } from '@evenrealities/pretext'
 import { startSttStream, type SttClient } from './asr/stt'
 import { mountUi, setStatus, setTranslation, setOutputMode, setSessionState, setAppMode, setConversationCue, setConversationStatus, setConversationSummary } from './ui'
 import { CaptionTiming } from './caption-timing'
+import { CaptionPager } from './caption-pager'
 import { ConversationSession, conversationRequest, type ConversationCue, type ConversationConfig, type ConversationSummary } from './conversation'
 import { type AppSettings, SETTINGS_KEY, mergeSettings } from './settings'
 
@@ -65,6 +66,7 @@ let currentText = 'Starting…'
 let lastText = ''
 let rawText = ''
 let committedText = ''
+let captionPage = ''
 const captionTiming = new CaptionTiming(settings.captionHoldSeconds, () => { recomputeDisplay(); scheduleGlassesRender() })
 let latestCue: ConversationCue | null = null
 let cueText = ''
@@ -180,43 +182,43 @@ function centerLine(line: string): string {
   return pad > 0 ? ' '.repeat(pad) + line : line
 }
 
-// `visibleLines` = how many content lines to show (most recent).
-// `paneLines`    = physical rows in the pane; for bottom anchoring we pad the
-//                  top so the newest line sits at the pane's bottom row.
-function fitTail(text: string, placeholder: string, visibleLines: number, paneLines: number): string {
-  let t = text.trim()
-  let lines: string[]
-  if (!t) {
-    lines = [placeholder]
-  } else {
-    if (settings.splitSentences) t = splitSentences(t)
-    const tail = t.length > 1400 ? t.slice(-1400) : t
-    const gap = settings.lineGap || 0
-    const out: string[] = []
-    const paras = tail.split('\n')
-    for (let i = 0; i < paras.length; i++) {
-      if (i > 0) for (let g = 0; g < gap; g++) out.push('')
-      let wl = wrapToLines(paras[i], innerW)
-      if (settings.align === 'center') wl = wl.map(centerLine)
-      out.push(...wl)
-    }
-    lines = out.slice(-visibleLines)
-    while (lines.length && lines[0] === '') lines.shift() // no leading blank
-  }
-  if (settings.vAlign === 'bottom') {
-    // Pad with single-space rows (guaranteed to render) so content sticks to
-    // the bottom — the newest line stays at a fixed position.
-    const pad = Math.max(0, paneLines - lines.length)
-    if (pad > 0) lines = new Array(pad).fill(' ').concat(lines)
-  }
-  return lines.join('\n')
+function visibleCaptionLines() {
+  return settings.maxLines > 0 ? Math.min(paneLines, settings.maxLines) : paneLines
 }
 
+function wrapCaptionText(text: string): string[] {
+  const paragraphs = (settings.splitSentences ? splitSentences(text) : text).trim().split('\n')
+  const lines: string[] = []
+  for (const paragraph of paragraphs) {
+    if (lines.length) for (let i = 0; i < settings.lineGap; i++) lines.push('')
+    lines.push(...wrapToLines(paragraph, innerW))
+  }
+  return lines
+}
+
+const captionPager = new CaptionPager({ rows: visibleCaptionLines(), wrap: wrapCaptionText }, text => {
+  if (cleanedUp || !foreground || sessionState !== 'listening') return
+  captionPage = text
+  // A new page may repeat the same words; its reading time still starts now.
+  captionTiming.reset()
+  captionTiming.update(text)
+  recomputeDisplay()
+  scheduleGlassesRender()
+})
+
 function recomputeDisplay() {
-  const visible = settings.maxLines > 0 ? Math.min(paneLines, settings.maxLines) : paneLines
-  currentText = sessionState !== 'listening' || captionTiming.hidden
-    ? ' '
-    : fitTail(rawText, effectiveOutputMode() === 'translation' ? 'Translation…' : 'Listening…', visible, paneLines)
+  if (sessionState !== 'listening' || captionTiming.hidden) {
+    currentText = ' '
+    return
+  }
+  let lines = (captionPage || (effectiveOutputMode() === 'translation' ? 'Translation…' : 'Listening…')).split('\n')
+  if (settings.align === 'center') lines = lines.map(centerLine)
+  // Anchor the entire page area, never the current number of words/rows.
+  // Appending speech therefore leaves every earlier line in the same place.
+  if (settings.vAlign === 'bottom') {
+    lines = new Array(Math.max(0, paneLines - visibleCaptionLines())).fill(' ').concat(lines)
+  }
+  currentText = lines.join('\n')
 }
 
 // ── Glasses render (debounced + coalesced; never overlapping) ────────────────
@@ -457,7 +459,7 @@ function applySettings() {
         if (prefix) finalText = prefix + (finalText ? '\n' + finalText : '')
         rawText = finalText + interimText
         committedText = finalText
-        if (sessionState === 'listening') captionTiming.update(rawText)
+        if (sessionState === 'listening' && foreground) captionPager.update(finalText)
         if (settings.appMode === 'conversate' && sessionState === 'listening') aiSession?.update(finalText)
         recomputeDisplay()
         setTranslation(finalText, interimText)
@@ -526,10 +528,16 @@ async function handleSave(next: AppSettings) {
     if (speechChanged) {
       rawText = ''
       committedText = ''
+      captionPage = ''
+      captionPager.reset()
       captionTiming.reset()
       summaryStarted = false
       setTranslation('', '')
     }
+    if (needRebuild || next.maxLines !== prev.maxLines || next.lineGap !== prev.lineGap || next.splitSentences !== prev.splitSentences) {
+      captionPager.configure({ rows: visibleCaptionLines(), wrap: wrapCaptionText })
+    }
+    recomputeDisplay()
     if (needRebuild) await applyLayout()
     if (cleanedUp) return
     recomputeDisplay()
@@ -547,6 +555,7 @@ function cleanup() {
   if (cleanedUp) return
   cleanedUp = true
   stopConversation()
+  captionPager.dispose()
   captionTiming.dispose()
   foreground = false
   streamGeneration++
@@ -564,6 +573,7 @@ function handleSessionAction(action: 'pause' | 'resume' | 'end' | 'start') {
   if (cleanedUp) return
   if (action === 'pause') {
     sessionState = 'paused'
+    captionPager.suspend()
     stopMicrophone()
     setStatus('setup', 'Paused')
     setSessionState('paused')
@@ -574,6 +584,7 @@ function handleSessionAction(action: 'pause' | 'resume' | 'end' | 'start') {
   }
   if (action === 'resume') {
     sessionState = 'listening'
+    captionPager.resume()
     setSessionState('listening')
     aiSession?.resume()
     if (stt && streamLive) startMicrophone(streamGeneration)
@@ -582,6 +593,7 @@ function handleSessionAction(action: 'pause' | 'resume' | 'end' | 'start') {
   }
   if (action === 'end') {
     sessionState = 'ended'
+    captionPager.suspend()
     stopMicrophone()
     setStatus('setup', 'Session ended')
     setSessionState('ended')
@@ -595,6 +607,8 @@ function handleSessionAction(action: 'pause' | 'resume' | 'end' | 'start') {
   sessionState = 'listening'
   rawText = ''
   committedText = ''
+  captionPage = ''
+  captionPager.reset()
   captionTiming.reset()
   summaryStarted = false
   void configureConversation()
@@ -627,6 +641,7 @@ unsubscribe = bridge.onEvenHubEvent(event => {
   // Stop capturing but let WhisperLiveKit flush the last spoken words.
   if (sysType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
     foreground = false
+    captionPager.suspend()
     aiSession?.pause()
     clearCue()
     captionTiming.clear()
@@ -641,7 +656,7 @@ unsubscribe = bridge.onEvenHubEvent(event => {
   }
   if (sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
     foreground = true
-    if (sessionState === 'listening') aiSession?.resume()
+    if (sessionState === 'listening') { captionPager.resume(); aiSession?.resume() }
     forceRender()
     applySettings()
     return

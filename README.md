@@ -11,7 +11,8 @@ A preconfigured installation connects to its server and starts listening automat
 - **Translate** displays English translation with optional speaker labels. English is the supported translation target.
 - **Conversate** keeps source-language captions and adds AI cues, optional Prep notes, and a summary with action items after End. Its AI provider must be configured on the backend.
 - **Pause** stops microphone capture and immediately clears the glasses. The phone keeps the current session text. **Resume** continues; **End** or a double-tap on the temple finishes the session, including final speech and the Conversate summary. Start appears after a session has ended.
-- **Clear captions after** offers 3, 5, 10, or 15 seconds after the last changed caption, or **Stay until replaced**. The default is 5 seconds. Pause clears the lens in either case.
+- Glasses show **confirmed speech on steady pages**. Rows stay in place as a page fills, then the whole page advances after a 2.5-second reading pause. Updates are at least 700 milliseconds apart, and continuing speech repeats its speaker label on the next page. The phone keeps live wording, including text still being revised.
+- **Clear captions after** offers 3, 5, 10, or 15 seconds after the last displayed caption update, or **Stay until replaced**. The default is 5 seconds. Pause clears the lens in either case.
 - Conversate's **Auto pop-up** and separate **Cue duration** control AI cues on the glasses. You can also use **Show on glasses** for a received cue.
 
 The phone interface follows the layout and neutral colors of the native [Translate](https://support.evenrealities.com/hc/en-us/articles/14273831059983-Translate) and [Conversate](https://support.evenrealities.com/hc/en-us/articles/14273795154319-Conversate) references: language controls, readable session text, settings, and Pause/End controls. Translate shows up to **eight lines** on the lens at the native font size. Conversate shows **five caption lines**, with a separate three-line AI cue area above. The default Auto line count fills the available caption area. This is an independent Even Hub implementation. It cannot replace the glasses operating system's built-in Translate or Conversate applications. It does not provide reverse-direction translation, simultaneous original/translated streams, or Even account history integration.
@@ -116,7 +117,7 @@ launchctl kickstart -k "gui/$(id -u)/com.scottrad.whisperlivekit"
 
 This example selects GPU inference on Apple silicon. The service uses the project environment, restarts through launchd, and rotates `$HOME/whisperlivekit-backend/logs/server.log`. A private TLS gateway can expose that loopback service as `wss://<mini-tailnet-hostname>:18443/asr` to authorized tailnet devices. Configure the deployed app with that endpoint once. No machine-specific address or credentials are included in this repository.
 
-On the tested M4 Mac mini, four recordings reached their final result in 8.93–29.08 seconds for 7.85–27.66 seconds of audio, including trailing silence. First captions arrived in about 1.6–1.7 seconds after warm-up and 4.92 seconds on the cold first run. See the [complete measurements](VERIFICATION.md#mac-mini-private-speech-backend-mlx-gpu); performance varies with speech and server load.
+On the tested M4 Mac mini, four recordings reached their final result in 8.93–29.08 seconds for 7.85–27.66 seconds of audio, including trailing silence. First ASR text results, including provisional wording, arrived in about 1.6–1.7 seconds after warm-up and 4.92 seconds on the cold first run. Confirmed glasses pages can appear later; these measurements predate the steady-page display and do not measure its latency. See the [complete measurements](VERIFICATION.md#mac-mini-private-speech-backend-mlx-gpu); performance varies with speech and server load.
 
 ## Network and privacy
 
@@ -137,7 +138,7 @@ npm run pack
 
 The package is `whisperlivekit-translate.ehpk`. Build before packing. The checks and remaining limits are recorded in [VERIFICATION.md](VERIFICATION.md).
 
-The current verification includes 55 client tests, 27 backend tests, four real speech recordings through the private Mac mini, a complete Conversate speech-plus-Codex test, and Russian translation visible in the native simulator. Physical G2 hardware has not been tested.
+The current verification includes 69 client tests, 27 backend tests, four real speech recordings through the private Mac mini, a complete Conversate speech-plus-Codex test, the Russian confirmed-page application path, and Russian translation visible in the native simulator. Physical G2 hardware has not been tested.
 
 The speech smoke test uses the same WebSocket client as the app, streams real speech, and waits for final server acknowledgment:
 

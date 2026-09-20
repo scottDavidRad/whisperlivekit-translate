@@ -2,7 +2,19 @@
 
 This record describes checks performed for the WhisperLiveKit-only fork on September 20, 2026. It distinguishes native desktop simulator, software integration, speech-server, and physical G2 verification.
 
-## Current interface and Conversate checks
+## Version 0.3.1: steady caption pages
+
+The latest readability change puts confirmed speech on steady glasses pages while the phone retains live, revisable wording. It keeps eight caption lines in Translate and five in Conversate. Rows remain anchored as the page fills; a full page gets a 2.5-second reading pause before advancing, updates are at least 700 milliseconds apart, and a continuing speaker's label repeats on the next page. Caption expiry is measured from the last displayed caption update.
+
+The steady-page build was replayed in the native simulator with Russian speech. Its green-on-black lens visibly showed confirmed pages anchored at the top, without “Speaker pending”; the translated meeting, presentation, and invitation text was readable. The microphone replay also contained words outside the fixture and an extra speaker label, so this latest run does not establish clean transcription or a reliable 1 → 2 → 1 sequence. Earlier direct-stream and native speaker checks below are separate evidence.
+
+Final validation passed **69 client tests**, including **14 caption-page tests**, TypeScript checking, the Vite production build, and packaging. The version **0.3.1** package is **81,114 bytes**. The **27 Python tests** passed at the preceding backend baseline; the display-only changes did not require a backend rerun.
+
+The final `smoke:app` run streamed the Russian Milena → DmitryNeural → Milena recording through the actual `main.ts` and SDK event parser to the real private secure backend. It processed **36.2 seconds of PCM**, **363 SDK audio events**, and **1,159,022 bytes**, producing **21 glasses updates** and speaker labels **1 → 2 → 1**. All three paragraphs translated correctly, apart from “Okay” and “Great” being assigned to the preceding voice. Captured lens updates repeated the Speaker 2 label for the continued invitation passage, then showed Speaker 1's return. One finish frame received one final acknowledgment, and the microphone stopped.
+
+This application run used a stubbed native SDK microphone/display bridge; its speech server and application logic were real. It verifies the confirmed-page software path, while the separate native observations and acoustic limitations above remain unchanged. The build results below describe the preceding expanded-layout baseline.
+
+## Verified interface and Conversate baseline
 
 The phone interface was updated from the official Translate and Conversate references. It is an independent Even Hub app using SDK text containers; it does not replace the operating system's built-in applications.
 
@@ -15,7 +27,7 @@ The phone interface was updated from the official Translate and Conversate refer
 
 Conversate uses `task=transcribe`, while Translate uses `task=translate` by default. Auto remains the default source; optional manual language choices use a per-connection request and require matching server acknowledgment. The new settings include Codex, Grok, Qwen 3.8, and OpenAI-compatible providers; availability depends on backend configuration. No credential input appears in the phone UI.
 
-Captions default to clearing after five seconds without a changed caption. Three, ten, and fifteen seconds are also available, plus zero/Stay until replaced. Pause clears the glasses immediately in either mode, while the phone retains the current session text. AI cue duration is separate.
+The expanded-layout baseline cleared captions after five seconds without a changed caption by default. Three, ten, and fifteen seconds were also available, plus zero/Stay until replaced. Pause cleared the glasses immediately in either mode, while the phone retained the current session text. AI cue duration was separate. The steady-page change above moves the expiry timer to displayed caption updates.
 
 The current checks include the final session-lifecycle regressions. Earlier speech results below remain useful baselines. Physical G2 hardware remains untested.
 
@@ -34,6 +46,16 @@ The expanded build was then inspected in the native simulator: the header appear
 A separate `smoke:app` test ran the actual `main.ts` and SDK event parser against **both the real Mac mini speech server and real Codex assistance**. It processed **16.0 seconds of audio through 160 SDK audio events**, produced one speaker label, and issued **16 glasses updates**. A real AI cue appeared in the phone and upper lens container. After End drained the final speech, the summary correctly reflected Sam's Thursday commitment and the Friday release.
 
 That combined Conversate test used a stubbed native microphone/glasses bridge and jsdom; its speech server and AI provider were real. The native microphone/display check above was a separate Russian Translate session. Neither is a physical G2 hardware test.
+
+## Russian conversation with two alternating voices
+
+A **35.219-second** Russian recording alternated **Milena → DmitryNeural → Milena**. `npm run smoke` streamed it through the actual `src/asr/stt.ts` client to the deployed speech backend with **Auto** source selection and `task=translate`. Including one second of trailing silence, it sent about **36.2 seconds of PCM**, received **365 snapshots** (**259 with interim text**), displayed **two speakers in the sequence 1 → 2 → 1**, and completed the final drain successfully.
+
+All three paragraphs translated correctly into English: tomorrow's meeting at nine and next week's schedule; preparing the presentation, checking documents, and sending invitations after lunch; then checking the room and equipment, dividing responsibilities, and thanking the other speaker. The short turn openers “Okay” and “Great” were assigned to the preceding voice. This is a successful recorded-audio translation and diarization check, with a speaker-boundary limitation.
+
+The same Russian conversation was also played through the real Mac microphone into the native simulator. Phone accessibility text and screenshots confirmed **Speaker 1 → Speaker 2 → Speaker 1**, and the expanded green-on-black lens visibly showed the second speaker's presentation and afternoon-invitation text. Acoustic recognition was less accurate than the direct stream: the first turn added “the driver” and misread next week's schedule; the second turn was correct; the returning first voice began with “Personally” and lost part of the room/equipment clause. The final responsibility/help passage remained understandable. This verifies live native translation, speaker changes, and visible lens output, not clean transcription of every turn.
+
+The fixture used macOS speech and [edge-tts](https://github.com/rany2/edge-tts) for its two voices. Edge TTS was used only to generate test audio; it is not an app dependency or part of the recognition pipeline.
 
 ## Live Codex assistance
 
@@ -59,9 +81,9 @@ A standalone Spanish test contained one duplicate “test”; the mixed-language
 
 The final deployment uses an **Apple M4 Mac mini with 16 GB RAM**, MLX float16 small-model inference, automatic source selection, English translation, and Sortformer diarization. It uses one decoding beam and one-second speech chunks. A dedicated inference thread fixed an MLX thread-affinity crash; the following rerun began cold, without a warm-up recording.
 
-All four recordings passed through the private secure endpoint and received `ready_to_stop`. English output was correct for these recordings, and the alternating voices retained labels **1 → 2 → 1**.
+All four recordings passed through the private secure endpoint and received `ready_to_stop`. English output was correct for these recordings, and the alternating voices retained labels **1 → 2 → 1**. “First ASR text” below includes provisional wording from the speech server; it is not a measurement of when the later confirmed-only glasses pages appear.
 
-| Recording | Audio sent, including two seconds of silence | First caption | Completion including final drain |
+| Recording | Audio sent, including two seconds of silence | First ASR text | Completion including final drain |
 |---|---:|---:|---:|
 | Russian, cold start | 8.37 s | 4.92 s | 10.03 s |
 | Spanish | 7.85 s | 1.61 s | 8.93 s |
@@ -74,7 +96,7 @@ The two-voice recording improved from **48.81 seconds on CPU to 29.08 seconds on
 
 The server was deployed to an **Apple M4 Mac mini with 16 GB RAM**, running the multilingual small model with automatic source selection, English translation, and Sortformer diarization. A per-user launchd service starts it, and private TLS access forwards to a loopback listener. The deployment did not publish a public tunnel or replace existing private gateway configuration.
 
-Four real recordings passed through the private secure endpoint: Russian, Spanish, Russian → Spanish in one connection, and two voices alternating **1 → 2 → 1**. First captions arrived after roughly **3.3–3.7 seconds**.
+Four real recordings passed through the private secure endpoint: Russian, Spanish, Russian → Spanish in one connection, and two voices alternating **1 → 2 → 1**. First ASR text results, including provisional wording, arrived after roughly **3.3–3.7 seconds**; these timings predate the steady-page glasses display.
 
 | Recording | Audio sent, including two seconds of silence | Completion including final drain |
 |---|---:|---:|
