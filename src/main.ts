@@ -8,7 +8,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { getTextWidth } from '@evenrealities/pretext'
 import { startSttStream, type SttClient } from './asr/stt'
-import { mountUi, setStatus, setTranscript, setTranslation, setTargetLangLabel } from './ui'
+import { mountUi, setStatus, setTranslation, setOutputMode } from './ui'
 import { type AppSettings, SETTINGS_KEY, mergeSettings } from './settings'
 
 const bridge = await waitForEvenAppBridge()
@@ -16,17 +16,22 @@ const bridge = await waitForEvenAppBridge()
 // ── Serial bridge queue ──────────────────────────────────────────────────────
 // The SDK can crash the BLE link if bridge calls overlap, and a flaky hop can
 // hang ~30s. Funnel every mutation through one FIFO chain with a per-call
-// timeout so calls never overlap and never hang the pipeline.
+// timeout so an unresponsive call does not hang the pipeline.
 let bridgeChain: Promise<unknown> = Promise.resolve()
 function serial<T>(label: string, fn: () => Promise<T>, ms = 4000): Promise<T> {
-  const run = bridgeChain.then(() =>
-    Promise.race([
-      fn(),
-      new Promise<never>((_, reject) =>
-        window.setTimeout(() => reject(new Error(`bridge.${label} timed out (${ms}ms)`)), ms),
-      ),
-    ]),
-  )
+  const run = bridgeChain.then(async () => {
+    let timer: number | undefined
+    try {
+      return await Promise.race([
+        Promise.resolve().then(fn),
+        new Promise<never>((_, reject) => {
+          timer = window.setTimeout(() => reject(new Error(`bridge.${label} timed out (${ms}ms)`)), ms)
+        }),
+      ])
+    } finally {
+      window.clearTimeout(timer)
+    }
+  })
   bridgeChain = run.then(
     () => undefined,
     () => undefined,
@@ -43,77 +48,48 @@ async function loadSettings(): Promise<AppSettings> {
     /* first run */
   }
   const s = mergeSettings(raw)
-  if (!s.apiKey && import.meta.env.DEV) {
-    const devKey = (import.meta.env.VITE_STT_API_KEY as string) || ''
-    if (devKey) s.apiKey = devKey
-  }
+  if (!s.serverUrl) s.serverUrl = import.meta.env.VITE_WHISPERLIVEKIT_URL || ''
   return s
 }
 
 let settings = await loadSettings()
-mountUi({ settings, onSave: handleSave })
+let startupReady = false
+let foreground = true
+let cleanedUp = false
 
 // ── Render state ─────────────────────────────────────────────────────────────
-let curTranscript = 'Starting…'
-let curTranslation = '…'
-let lastTranscript = ''
-let lastTranslation = ''
-let rawTx = ''
-let rawTl = ''
+let currentText = 'Starting…'
+let lastText = ''
+let rawText = ''
 
-// ── Layout / geometry (borderless; width-aware; split or full-screen) ────────
+// ── Layout / geometry (one borderless, width-aware pane) ──────────────────────
 const PAD = 3
 const LINE_H = 27
 const spaceW = Math.max(1, getTextWidth('a a') - getTextWidth('aa'))
 
-let hasTranscript = settings.showTranscript
-let transcriptLines = 0
-let translationLines = 0
+const paneLines = Math.floor((288 - 2 * PAD) / LINE_H)
 let paneW = 576
 let paneX = 0
 let innerW = 570
 
-function mkPane(id: number, name: string, y: number, h: number, capture: boolean, content: string) {
-  return new TextContainerProperty({
-    xPosition: paneX, yPosition: y, width: paneW, height: h,
-    borderWidth: 0, paddingLength: PAD,
-    containerID: id, containerName: name, content, isEventCapture: capture ? 1 : 0,
-  })
-}
-
 function buildLayout() {
-  hasTranscript = settings.showTranscript
   paneW = Math.round((576 * (settings.widthPct || 100)) / 100)
   paneX = Math.round((576 - paneW) / 2)
   innerW = paneW - 2 * PAD
-  if (hasTranscript) {
-    const TOP_H = 62
-    const BOT_H = 288 - TOP_H
-    transcriptLines = Math.floor((TOP_H - 2 * PAD) / LINE_H)
-    translationLines = Math.floor((BOT_H - 2 * PAD) / LINE_H)
-    return {
-      containerTotalNum: 2,
-      textObject: [
-        mkPane(1, 'transcript', 0, TOP_H, false, curTranscript),
-        mkPane(2, 'translation', TOP_H, BOT_H, true, curTranslation),
-      ],
-    }
+  return {
+    containerTotalNum: 1,
+    textObject: [new TextContainerProperty({
+      xPosition: paneX, yPosition: 0, width: paneW, height: 288,
+      borderWidth: 0, paddingLength: PAD,
+      containerID: 1, containerName: 'output', content: currentText, isEventCapture: 1,
+    })],
   }
-  transcriptLines = 0
-  translationLines = Math.floor((288 - 2 * PAD) / LINE_H)
-  return { containerTotalNum: 1, textObject: [mkPane(2, 'translation', 0, 288, true, curTranslation)] }
-}
-
-const created = await serial('createStartUpPage', () =>
-  bridge.createStartUpPageContainer(new CreateStartUpPageContainer(buildLayout())),
-)
-if (created !== 0) {
-  setStatus('error', `createStartUpPageContainer failed: ${created}`)
-  console.error('Failed to create startup page')
 }
 
 async function applyLayout() {
-  await serial('rebuild', () => bridge.rebuildPageContainer(new RebuildPageContainer(buildLayout())))
+  if (!startupReady || cleanedUp) return
+  const rebuilt = await serial('rebuild', () => bridge.rebuildPageContainer(new RebuildPageContainer(buildLayout())))
+  if (!rebuilt) throw new Error('The glasses display could not be rebuilt.')
 }
 
 // ── Text fitting: wrap, align, sentence-spacing, keep last N (autoscroll) ────
@@ -195,10 +171,8 @@ function fitTail(text: string, placeholder: string, visibleLines: number, paneLi
 }
 
 function recomputeDisplay() {
-  if (hasTranscript) curTranscript = fitTail(rawTx, 'Listening…', transcriptLines, transcriptLines)
-  const visible = settings.maxLines > 0 ? Math.min(translationLines, settings.maxLines) : translationLines
-  const primary = settings.targetLang ? rawTl : rawTx
-  curTranslation = fitTail(primary, settings.targetLang ? 'Translation…' : 'Listening…', visible, translationLines)
+  const visible = settings.maxLines > 0 ? Math.min(paneLines, settings.maxLines) : paneLines
+  currentText = fitTail(rawText, settings.outputMode === 'translation' ? 'Translation…' : 'Listening…', visible, paneLines)
 }
 
 // ── Glasses render (debounced + coalesced; never overlapping) ────────────────
@@ -207,6 +181,7 @@ let renderDirty = false
 let renderInFlight = false
 
 function scheduleGlassesRender() {
+  if (!startupReady || cleanedUp || !foreground) return
   renderDirty = true
   if (renderInFlight || renderTimer !== null) return
   renderTimer = window.setTimeout(runRender, 120)
@@ -214,28 +189,22 @@ function scheduleGlassesRender() {
 
 async function runRender() {
   renderTimer = null
-  if (renderInFlight) return
+  if (renderInFlight || cleanedUp || !foreground) return
   renderInFlight = true
   try {
-    while (renderDirty) {
+    while (renderDirty && !cleanedUp && foreground) {
       renderDirty = false
-      const tx = curTranscript
-      const tl = curTranslation
-      if (hasTranscript && tx !== lastTranscript) {
-        await serial('upgrade.transcript', () =>
-          bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'transcript', content: tx })),
+      const text = currentText
+      if (text !== lastText) {
+        const upgraded = await serial('upgrade.output', () =>
+          bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'output', content: text })),
         )
-        lastTranscript = tx
-      }
-      if (tl !== lastTranslation) {
-        await serial('upgrade.translation', () =>
-          bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 2, containerName: 'translation', content: tl })),
-        )
-        lastTranslation = tl
+        if (!upgraded) throw new Error('The glasses text could not be updated.')
+        lastText = text
       }
     }
   } catch (err) {
-    // Leave last* unset on the failed pane so the next change retries it.
+    // Leave lastText unset on failure so the next change retries it.
     console.warn('[render] upgrade failed:', (err as Error)?.message ?? err)
   } finally {
     renderInFlight = false
@@ -244,141 +213,196 @@ async function runRender() {
 }
 
 function forceRender() {
-  lastTranscript = ''
-  lastTranslation = ''
+  lastText = ''
   scheduleGlassesRender()
 }
 
 // ── STT lifecycle ────────────────────────────────────────────────────────────
 let stt: SttClient | null = null
+let streamGeneration = 0
+let streamLive = false
 let micOn = false
 
-function onSnapshot({ transcriptFinal, transcriptInterim, translationFinal, translationInterim }: {
-  transcriptFinal: string; transcriptInterim: string; translationFinal: string; translationInterim: string
-}) {
-  rawTx = transcriptFinal + transcriptInterim
-  rawTl = translationFinal + translationInterim
-  recomputeDisplay()
-  setTranscript(transcriptFinal, transcriptInterim)
-  setTranslation(translationFinal, translationInterim)
-  scheduleGlassesRender()
+function isCurrentStream(generation: number) {
+  return generation === streamGeneration && !cleanedUp
 }
 
-function onSttError(err: unknown) {
-  setStatus('error', `STT: ${(err as Error)?.message ?? err}`)
+function stopMicrophone() {
+  if (!micOn) return
+  micOn = false
+  void serial('audioOff', () => bridge.audioControl(false)).then(ok => {
+    if (!ok) console.warn('The glasses did not confirm microphone shutdown.')
+  }).catch(err => console.warn('Failed to stop microphone:', err))
+}
+
+function failStream(generation: number, err: unknown) {
+  if (!isCurrentStream(generation)) return
+  // Invalidate callbacks before close() emits its final status.
+  streamGeneration++
+  streamLive = false
+  const failed = stt
+  stt = null
+  stopMicrophone()
+  failed?.close()
+  setStatus('error', `STT: ${err instanceof Error ? err.message : String(err)}`)
   console.error('STT error:', err)
 }
 
-function applySettings() {
-  stt?.close()
-  stt = null
-  setTargetLangLabel(settings.targetLang)
-
-  if (!settings.apiKey) {
-    if (micOn) {
-      serial('audioOff', () => bridge.audioControl(false))
-      micOn = false
+function startMicrophone(generation: number) {
+  if (micOn || !startupReady || !foreground || !isCurrentStream(generation)) return
+  micOn = true
+  void serial('audioOn', () => {
+    // A queued start may have been superseded by backgrounding or new settings.
+    if (!micOn || !streamLive || !foreground || !isCurrentStream(generation)) return Promise.resolve(true)
+    return bridge.audioControl(true)
+  }).then(ok => {
+    if (!ok) throw new Error('The glasses could not start the microphone.')
+    if (micOn && streamLive && foreground && isCurrentStream(generation)) {
+      setStatus('listening', 'Microphone live · double-tap the temple to exit')
     }
-    curTranscript = '⚙ Setup needed'
-    curTranslation = 'Open this app on your phone → Settings, and add your Soniox API key.'
+  }).catch(err => failStream(generation, err))
+}
+
+function applySettings() {
+  if (cleanedUp) return
+  const generation = ++streamGeneration
+  const previous = stt
+  stt = null
+  streamLive = false
+  stopMicrophone()
+  previous?.close()
+  if (!startupReady || !foreground) return
+  setOutputMode(settings.outputMode)
+
+  if (!settings.serverUrl) {
+    currentText = 'Open this app on your phone → Settings, and add your WhisperLiveKit server URL.'
     forceRender()
-    setStatus('setup', 'Add your Soniox API key in Settings')
+    setStatus('setup', 'Add your WhisperLiveKit server URL in Settings')
     return
   }
 
   try {
-    stt = startSttStream(
+    const client = startSttStream(
       {
-        apiKey: settings.apiKey,
-        targetLang: settings.targetLang,
+        serverUrl: settings.serverUrl,
         splitSentences: settings.splitSentences,
         speakerLabels: settings.speakerLabels,
-        noTranslateLangs: settings.noTranslateLangs,
       },
-      onSnapshot,
-      onSttError,
+      ({ finalText, interimText }) => {
+        if (!isCurrentStream(generation)) return
+        rawText = finalText + interimText
+        recomputeDisplay()
+        setTranslation(finalText, interimText)
+        scheduleGlassesRender()
+      },
+      err => failStream(generation, err),
       status => {
-        if (status === 'live') setStatus('listening', 'Microphone live · double-tap the temple to exit')
-        else if (status === 'connecting') setStatus('connecting', 'Connecting to Soniox…')
-        else if (status === 'reconnecting') setStatus('reconnecting', 'Reconnecting…')
+        if (!isCurrentStream(generation)) return
+        streamLive = status === 'live'
+        if (status === 'live') {
+          startMicrophone(generation)
+        } else if (status === 'connecting') {
+          setStatus('connecting', 'Connecting to WhisperLiveKit…')
+        } else if (status === 'reconnecting') {
+          stopMicrophone()
+          setStatus('reconnecting', 'Reconnecting…')
+        } else if (status === 'closed') {
+          stopMicrophone()
+          // Retain a drained background session until resume closes it. Fatal
+          // errors already invalidated this callback and keep their error text.
+          if (foreground) {
+            stt = null
+            setStatus('setup', 'Audio session ended. Save Settings to reconnect.')
+          }
+        }
       },
     )
+    if (isCurrentStream(generation)) stt = client
+    else client.close()
   } catch (err) {
-    onSttError(err)
-    return
-  }
-
-  if (!micOn) {
-    serial('audioOn', () => bridge.audioControl(true))
-    micOn = true
+    failStream(generation, err)
   }
 }
 
 async function handleSave(next: AppSettings) {
+  if (cleanedUp) return
   const prev = settings
   settings = next
-  serial('saveSettings', () => bridge.setLocalStorage(SETTINGS_KEY, JSON.stringify(next))).catch(err =>
+  void serial('saveSettings', () => bridge.setLocalStorage(SETTINGS_KEY, JSON.stringify(next))).catch(err =>
     console.error('Failed to persist settings:', err),
   )
 
-  const needRebuild = next.showTranscript !== prev.showTranscript || next.widthPct !== prev.widthPct
-  const needRestart =
-    next.apiKey !== prev.apiKey ||
-    next.targetLang !== prev.targetLang ||
+  const needRebuild = next.widthPct !== prev.widthPct
+  const needRestart = !stt ||
+    next.serverUrl !== prev.serverUrl ||
+    next.outputMode !== prev.outputMode ||
     next.splitSentences !== prev.splitSentences ||
-    next.speakerLabels !== prev.speakerLabels ||
-    next.noTranslateLangs.join(',') !== prev.noTranslateLangs.join(',')
+    next.speakerLabels !== prev.speakerLabels
 
-  if (needRestart) {
-    rawTx = ''
-    rawTl = ''
-    curTranscript = 'Listening…'
-    curTranslation = next.targetLang ? 'Translation…' : 'Listening…'
+  try {
+    if (needRestart) {
+      rawText = ''
+      setTranslation('', '')
+    }
     if (needRebuild) await applyLayout()
-    else forceRender()
-    applySettings()
-  } else {
-    if (needRebuild) await applyLayout()
+    if (cleanedUp) return
     recomputeDisplay()
     forceRender()
+    if (needRestart) applySettings()
+  } catch (err) {
+    setStatus('error', `Display: ${err instanceof Error ? err.message : String(err)}`)
+    console.error('Failed to apply settings:', err)
   }
 }
 
-applySettings()
-
 // ── Cleanup + event routing ──────────────────────────────────────────────────
-let cleanedUp = false
+let unsubscribe = () => {}
 function cleanup() {
   if (cleanedUp) return
   cleanedUp = true
-  serial('audioOff', () => bridge.audioControl(false))
+  foreground = false
+  streamGeneration++
+  streamLive = false
+  stopMicrophone()
   stt?.close()
+  stt = null
+  if (renderTimer !== null) window.clearTimeout(renderTimer)
+  renderTimer = null
+  renderDirty = false
   unsubscribe()
 }
 
-const unsubscribe = bridge.onEvenHubEvent(event => {
-  const pcm = event.audioEvent?.audioPcm
-  if (pcm) stt?.sendPcm(pcm)
+mountUi({ settings, onSave: handleSave })
 
+// Listen before starting either the page or microphone so the first PCM frame
+// cannot arrive before an event handler exists.
+unsubscribe = bridge.onEvenHubEvent(event => {
+  if (cleanedUp) return
   const sysType = event.sysEvent?.eventType ?? null
   const textType = event.textEvent?.eventType ?? null
 
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-    serial('exit', () => bridge.shutDownPageContainer(1))
+    cleanup()
+    void serial('exit', () => bridge.shutDownPageContainer(1)).catch(err =>
+      console.warn('Failed to close the glasses page:', err),
+    )
     return
   }
 
-  // Lifecycle — survive the 5-minute locked-phone test cleanly.
+  // Stop capturing but let WhisperLiveKit flush the last spoken words.
   if (sysType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
-    if (micOn) {
-      serial('audioOff', () => bridge.audioControl(false))
-      micOn = false
+    foreground = false
+    streamLive = false
+    stopMicrophone()
+    try {
+      stt?.finish()
+    } catch (err) {
+      failStream(streamGeneration, err)
     }
-    stt?.close()
-    stt = null
     return
   }
   if (sysType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
+    foreground = true
     forceRender()
     applySettings()
     return
@@ -386,7 +410,29 @@ const unsubscribe = bridge.onEvenHubEvent(event => {
 
   if (sysType === OsEventTypeList.SYSTEM_EXIT_EVENT || sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
     cleanup()
+    return
+  }
+
+  const pcm = event.audioEvent?.audioPcm
+  if (pcm && micOn && foreground) {
+    try {
+      stt?.sendPcm(pcm)
+    } catch (err) {
+      failStream(streamGeneration, err)
+    }
   }
 })
 
 window.addEventListener('beforeunload', cleanup)
+
+try {
+  const created = await serial('createStartUpPage', () =>
+    bridge.createStartUpPageContainer(new CreateStartUpPageContainer(buildLayout())),
+  )
+  if (created !== 0) throw new Error(`createStartUpPageContainer failed: ${created}`)
+  startupReady = true
+  if (!cleanedUp && foreground) applySettings()
+} catch (err) {
+  setStatus('error', err instanceof Error ? err.message : String(err))
+  console.error('Failed to create startup page:', err)
+}

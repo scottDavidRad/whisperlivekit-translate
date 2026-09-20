@@ -1,5 +1,4 @@
-import { LANGUAGES, langName } from './languages'
-import type { AppSettings } from './settings'
+import { validateServerUrl, type AppSettings, type OutputMode } from './settings'
 
 type Status = 'connecting' | 'listening' | 'error' | 'setup' | 'reconnecting'
 
@@ -12,12 +11,10 @@ const STATUS_LABEL: Record<Status, string> = {
 }
 
 let statusEl: HTMLDivElement
-let txFinalEl: HTMLSpanElement
-let txInterimEl: HTMLSpanElement
+let statusMessageEl: HTMLParagraphElement
 let tlFinalEl: HTMLSpanElement
 let tlInterimEl: HTMLSpanElement
 let tlLabelEl: HTMLDivElement
-let secondaryEl: HTMLElement
 
 export interface UiHandlers {
   settings: AppSettings
@@ -26,43 +23,39 @@ export interface UiHandlers {
 
 export function mountUi({ settings, onSave }: UiHandlers) {
   const app = document.querySelector<HTMLDivElement>('#app')!
-  const langOptions = LANGUAGES.map(
-    l => `<option value="${l.code}"${l.code === settings.targetLang ? ' selected' : ''}>${l.name}</option>`,
-  ).join('')
   const opt = (n: number, label: string, sel: number) =>
     `<option value="${n}"${n === sel ? ' selected' : ''}>${label}</option>`
 
   app.innerHTML = `
     <main class="panel">
       <header>
-        <h1>Soniox Translate</h1>
+        <h1>WhisperLiveKit Translate</h1>
         <div id="status" class="status status-connecting">Connecting…</div>
       </header>
+      <p id="status-message" class="status-message" role="status" aria-live="polite">Connecting…</p>
 
-      <details id="settings" class="settings"${settings.apiKey ? '' : ' open'}>
+      <details id="settings" class="settings"${settings.serverUrl ? '' : ' open'}>
         <summary>Settings</summary>
 
-        <div class="group-title">Soniox</div>
+        <div class="group-title">WhisperLiveKit server</div>
         <div class="field">
-          <label for="apiKey">API key</label>
-          <div class="key-wrap">
-            <input id="apiKey" type="password" autocomplete="off" autocapitalize="off"
-              spellcheck="false" placeholder="paste your Soniox key" value="${escapeAttr(settings.apiKey)}" />
-            <button id="revealKey" type="button" class="ghost">Show</button>
-          </div>
-          <p class="hint">Your key, your usage — free at
-            <a href="https://console.soniox.com" target="_blank" rel="noreferrer">console.soniox.com</a>.
-            Stored only on this phone.</p>
+          <label for="serverUrl">Server WebSocket URL</label>
+          <input id="serverUrl" type="url" autocomplete="off" autocapitalize="off"
+            spellcheck="false" placeholder="ws://&lt;computer LAN IP&gt;:8000/asr"
+            value="${escapeAttr(settings.serverUrl)}" aria-describedby="server-hint server-error" />
+          <p id="server-hint" class="hint">Run WhisperLiveKit on your computer. Use its LAN address from your phone;
+            localhost points to the phone itself. HTTPS pages require wss://.</p>
+          <p id="server-error" class="field-error" role="alert" hidden></p>
         </div>
         <div class="field">
-          <label for="lang">Translate to</label>
-          <select id="lang">${langOptions}</select>
-        </div>
-        <div class="field">
-          <label for="notranslate">Don't translate (keep original)</label>
-          <input id="notranslate" type="text" autocapitalize="off" spellcheck="false"
-            placeholder="e.g. es, fr" value="${escapeAttr(settings.noTranslateLangs.join(', '))}" />
-          <p class="hint">Language codes to leave untranslated. The target is always kept as-is.</p>
+          <label for="outputMode">Display output</label>
+          <select id="outputMode">
+            <option value="transcript"${settings.outputMode === 'transcript' ? ' selected' : ''}>Transcript</option>
+            <option value="translation"${settings.outputMode === 'translation' ? ' selected' : ''}>Translation</option>
+          </select>
+          <p class="hint">The server controls the model, source language, and diarization.
+            English translation requires starting the server with <code>--direct-english-translation</code>.
+            Selecting Translation here labels that server output; it does not change the server mode.</p>
         </div>
 
         <div class="group-title">Glasses display</div>
@@ -94,9 +87,8 @@ export function mountUi({ settings, onSave }: UiHandlers) {
             <select id="maxlines">${[0, 1, 2, 3, 4, 5, 6, 8].map(n => opt(n, n === 0 ? 'Auto' : String(n), settings.maxLines)).join('')}</select>
           </div>
         </div>
-        <label class="check"><input id="showtx" type="checkbox"${settings.showTranscript ? ' checked' : ''}/> Show original transcript <span class="dim">(off = translation full-screen)</span></label>
         <label class="check"><input id="split" type="checkbox"${settings.splitSentences ? ' checked' : ''}/> Split sentences onto new lines</label>
-        <label class="check"><input id="speakers" type="checkbox"${settings.speakerLabels ? ' checked' : ''}/> Label speakers <span class="dim">(● ■ ★ … — needs 2+ speakers)</span></label>
+        <label class="check"><input id="speakers" type="checkbox"${settings.speakerLabels ? ' checked' : ''}/> Label speakers <span class="dim">(requires server diarization)</span></label>
 
         <div class="actions">
           <button id="save" type="button" class="primary">Save</button>
@@ -106,52 +98,41 @@ export function mountUi({ settings, onSave }: UiHandlers) {
 
       <section class="pane pane-translation pane-primary" aria-live="polite">
         <div class="pane-head">
-          <div id="tl-label" class="pane-label">Translation · ${langName(settings.targetLang)}</div>
+          <div id="tl-label" class="pane-label">${settings.outputMode === 'translation' ? 'Translation · English' : 'Transcript'}</div>
           <button id="copyTl" type="button" class="ghost">Copy</button>
         </div>
         <div class="pane-body"><span id="tl-final"></span><span id="tl-interim" class="interim"></span></div>
       </section>
-      <section class="pane pane-secondary" aria-live="polite">
-        <div class="pane-label">Transcript · original</div>
-        <div class="pane-body"><span id="tx-final"></span><span id="tx-interim" class="interim"></span></div>
-      </section>
-
       <footer>Double-tap the glasses temple to exit.</footer>
     </main>
   `
 
   statusEl = app.querySelector<HTMLDivElement>('#status')!
-  txFinalEl = app.querySelector<HTMLSpanElement>('#tx-final')!
-  txInterimEl = app.querySelector<HTMLSpanElement>('#tx-interim')!
+  statusMessageEl = app.querySelector<HTMLParagraphElement>('#status-message')!
   tlFinalEl = app.querySelector<HTMLSpanElement>('#tl-final')!
   tlInterimEl = app.querySelector<HTMLSpanElement>('#tl-interim')!
   tlLabelEl = app.querySelector<HTMLDivElement>('#tl-label')!
-  secondaryEl = app.querySelector<HTMLElement>('.pane-secondary')!
 
   const $ = <T extends HTMLElement>(sel: string) => app.querySelector<T>(sel)!
-  const apiKeyEl = $<HTMLInputElement>('#apiKey')
-  const langEl = $<HTMLSelectElement>('#lang')
-  const notranslateEl = $<HTMLInputElement>('#notranslate')
+  const serverUrlEl = $<HTMLInputElement>('#serverUrl')
+  const serverErrorEl = $<HTMLParagraphElement>('#server-error')
+  const outputModeEl = $<HTMLSelectElement>('#outputMode')
   const alignEl = $<HTMLSelectElement>('#align')
   const valignEl = $<HTMLSelectElement>('#valign')
   const linegapEl = $<HTMLSelectElement>('#linegap')
   const widthEl = $<HTMLSelectElement>('#width')
   const maxlinesEl = $<HTMLSelectElement>('#maxlines')
-  const showtxEl = $<HTMLInputElement>('#showtx')
   const splitEl = $<HTMLInputElement>('#split')
   const speakersEl = $<HTMLInputElement>('#speakers')
   const savedEl = $<HTMLSpanElement>('#saved')
   const detailsEl = $<HTMLDetailsElement>('#settings')
 
-  // Show/hide the API key.
-  const revealEl = $<HTMLButtonElement>('#revealKey')
-  revealEl.addEventListener('click', () => {
-    const show = apiKeyEl.type === 'password'
-    apiKeyEl.type = show ? 'text' : 'password'
-    revealEl.textContent = show ? 'Hide' : 'Show'
+  serverUrlEl.addEventListener('input', () => {
+    serverErrorEl.hidden = true
+    serverUrlEl.removeAttribute('aria-invalid')
   })
 
-  // Copy the current translation text.
+  // Copy the currently displayed main output.
   const copyEl = $<HTMLButtonElement>('#copyTl')
   copyEl.addEventListener('click', () => {
     const text = (tlFinalEl.textContent ?? '') + (tlInterimEl.textContent ?? '')
@@ -159,11 +140,20 @@ export function mountUi({ settings, onSave }: UiHandlers) {
   })
 
   $<HTMLButtonElement>('#save').addEventListener('click', () => {
+    let serverUrl: string
+    try {
+      serverUrl = validateServerUrl(serverUrlEl.value)
+    } catch (err) {
+      serverErrorEl.textContent = err instanceof Error ? err.message : String(err)
+      serverErrorEl.hidden = false
+      serverUrlEl.setAttribute('aria-invalid', 'true')
+      serverUrlEl.focus()
+      return
+    }
+    serverUrlEl.value = serverUrl
     const next: AppSettings = {
-      apiKey: apiKeyEl.value.trim(),
-      targetLang: langEl.value,
-      showTranscript: showtxEl.checked,
-      noTranslateLangs: parseCodes(notranslateEl.value),
+      serverUrl,
+      outputMode: outputModeEl.value === 'translation' ? 'translation' : 'transcript',
       splitSentences: splitEl.checked,
       speakerLabels: speakersEl.checked,
       align: alignEl.value === 'center' ? 'center' : 'left',
@@ -172,15 +162,14 @@ export function mountUi({ settings, onSave }: UiHandlers) {
       widthPct: parseInt(widthEl.value, 10) || 100,
       maxLines: parseInt(maxlinesEl.value, 10) || 0,
     }
-    setTargetLangLabel(next.targetLang)
-    setSecondaryVisible(next.showTranscript)
+    setOutputMode(next.outputMode)
     savedEl.textContent = 'Saved ✓'
     setTimeout(() => (savedEl.textContent = ''), 2000)
-    if (next.apiKey) detailsEl.open = false
+    if (next.serverUrl) detailsEl.open = false
     onSave(next)
   })
 
-  setSecondaryVisible(settings.showTranscript)
+  setOutputMode(settings.outputMode)
   injectStyles()
 }
 
@@ -189,12 +178,8 @@ export function setStatus(kind: Status, text: string) {
   statusEl.className = `status status-${kind}`
   statusEl.textContent = STATUS_LABEL[kind]
   statusEl.title = text
-}
-
-export function setTranscript(finalText: string, interimText: string) {
-  if (!txFinalEl) return
-  txFinalEl.textContent = finalText
-  txInterimEl.textContent = interimText
+  statusMessageEl.textContent = text
+  statusMessageEl.hidden = !text
 }
 
 export function setTranslation(finalText: string, interimText: string) {
@@ -203,20 +188,8 @@ export function setTranslation(finalText: string, interimText: string) {
   tlInterimEl.textContent = interimText
 }
 
-export function setTargetLangLabel(code: string) {
-  if (!tlLabelEl) return
-  tlLabelEl.textContent = code ? `Translation · ${langName(code)}` : 'Transcript'
-}
-
-function setSecondaryVisible(visible: boolean) {
-  if (secondaryEl) secondaryEl.style.display = visible ? '' : 'none'
-}
-
-function parseCodes(s: string): string[] {
-  return s
-    .split(/[\s,]+/)
-    .map(x => x.trim().toLowerCase())
-    .filter(Boolean)
+export function setOutputMode(mode: OutputMode) {
+  if (tlLabelEl) tlLabelEl.textContent = mode === 'translation' ? 'Translation · English' : 'Transcript'
 }
 
 async function copyToClipboard(text: string, btn: HTMLButtonElement) {
@@ -262,6 +235,8 @@ function injectStyles() {
     .panel { display: flex; flex-direction: column; gap: 12px; min-height: 100vh;
       width: 100%; max-width: 640px; margin: 0 auto; padding: 20px; box-sizing: border-box; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .status-message { margin: 0; font-size: 13px; color: #A7A7A7; overflow-wrap: anywhere; }
+    .field-error { margin: 0; font-size: 13px; color: #FF453A; }
     h1 { font-size: 18px; font-weight: 600; margin: 0; letter-spacing: 0.02em; }
     .status { font-size: 12px; padding: 4px 10px; border-radius: 999px; white-space: nowrap;
       border: 1px solid transparent; letter-spacing: 0.04em; text-transform: uppercase; }
@@ -283,8 +258,6 @@ function injectStyles() {
     .field label { font-size: 12px; color: #A7A7A7; }
     .field input, .field select { background: rgba(255,255,255,0.06); color: #E5E5E5;
       border: 1px solid #3E3E3E; border-radius: 9px; padding: 11px 12px; font-size: 16px; width: 100%; box-sizing: border-box; }
-    .key-wrap { display: flex; gap: 8px; align-items: stretch; }
-    .key-wrap input { flex: 1; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
     .row .field { flex: 1 1 140px; min-width: 0; margin-bottom: 0; }
     .hint { margin: 0; font-size: 12px; color: #7B7B7B; }
@@ -305,13 +278,11 @@ function injectStyles() {
       padding: 14px 18px; min-height: 110px; }
     .pane-translation { border-color: rgba(60,250,68,0.22); }
     .pane-primary { flex: 2.5; }
-    .pane-secondary { flex: 1; opacity: 0.85; }
     .pane-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .pane-label { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #7B7B7B; }
     .pane-translation .pane-label { color: #3CFA44; }
     .pane-body { flex: 1; overflow: auto; color: #E5E5E5;
       font-size: 18px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-    .pane-secondary .pane-body { font-size: 15px; color: #B5B5B5; }
     .interim { color: #8E8E8E; }
     footer { font-size: 12px; color: #7B7B7B; text-align: center; }
   `

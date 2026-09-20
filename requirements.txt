@@ -1,0 +1,4 @@
+# Local speech server. Tested with Python 3.12.
+whisperlivekit==0.2.19
+faster-whisper==1.2.1
+ctranslate2==4.8.2

@@ -1,285 +1,212 @@
-// Soniox real-time speech-to-text + translation client for the G2 microphone.
-//
-// Streams the glasses mic (PCM s16le @ 16 kHz mono) to Soniox's real-time
-// WebSocket API (pcm_s16le @ 16000 natively — no resampling). With one-way
-// translation, Soniox returns original (translation_status "original") and
-// translated ("translation") tokens; we split them into transcript + translation
-// streams, mirror already-target-language speech, and drop translations of
-// keep-as-is languages (via source_language).
-//
-// Robustness:
-//   • Auto-reconnect with exponential backoff on unexpected drops — the
-//     accumulated transcript persists across reconnects.
-//   • Stops reconnecting on FATAL errors (bad key / invalid config).
-//   • Backpressure guard: drops frames when the socket buffer is backed up;
-//     caps the pre-connect buffer — bounded memory + latency on slow networks.
-//
-// Docs: https://soniox.com/docs/stt/rt/real-time-transcription
-//       https://soniox.com/docs/stt/rt/real-time-translation
+// WhisperLiveKit 0.2.19 /asr client. Server must run with --pcm-input.
+// Binary PCM s16le, 16 kHz mono; server responses replace cumulative snapshots.
+import { validateServerUrl } from '../settings.ts'
 
-const SONIOX_WS_URL = 'wss://stt-rt.soniox.com/transcribe-websocket'
-const DEFAULT_MODEL = 'stt-rt-v4'
 const SPEAKER_ICONS = ['●', '■', '★', '▲', '♦', '♥', '♣', '♠']
-const MAX_PENDING_CHUNKS = 50 // ~5s of audio buffered while (re)connecting
-const BACKPRESSURE_BYTES = 256_000 // ~8s of audio; drop frames past this
-const RECONNECT_MAX_MS = 8000
+const MAX_PENDING_BYTES = 160_000
+const BACKPRESSURE_BYTES = 256_000
+const MAX_TEXT = 100_000
 
 export type SttStatus = 'connecting' | 'live' | 'reconnecting' | 'closed'
-
 export interface SttOptions {
-  apiKey: string
-  /** Translation target language code; '' = transcript only. */
-  targetLang: string
-  /** Source language hints to improve accuracy; [] = auto-detect. */
-  languageHints?: string[]
-  /** Repurpose Soniox `<end>` pauses as line breaks. */
+  serverUrl: string
   splitSentences?: boolean
-  /** Speaker diarization with per-speaker icons. */
+  /** Display speaker IDs supplied by a server running with --diarization. */
   speakerLabels?: boolean
-  /** Language codes to keep as-is (skip translation; the target is always kept). */
-  noTranslateLangs?: string[]
-  /** Soniox real-time model id. */
-  model?: string
 }
-
 export interface SttSnapshot {
-  transcriptFinal: string
-  transcriptInterim: string
-  translationFinal: string
-  translationInterim: string
+  finalText: string
+  interimText: string
   finished: boolean
 }
-
 export interface SttClient {
   sendPcm(chunk: Uint8Array): void
+  /** Flush audio and receive final results. */
+  finish(): void
+  /** Immediately release a superseded or abandoned session. */
   close(): void
 }
-
-interface SonioxToken {
-  text?: string
-  is_final?: boolean
-  speaker?: string
-  language?: string
-  source_language?: string
-  translation_status?: string // "original" | "translation" | "none"
+interface WhisperLine { text?: string; speaker?: number }
+interface WhisperResponse {
+  type?: string
+  useAudioWorklet?: boolean
+  status?: string
+  error?: string
+  lines?: WhisperLine[]
+  buffer_transcription?: string
+  buffer_diarization?: string
 }
 
-interface SonioxResponse {
-  tokens?: SonioxToken[]
-  finished?: boolean
-  error_code?: number
-  error_type?: string
-  error_message?: string
-}
-
-function isControlToken(text: string): boolean {
-  return /^<[a-z_]+>$/i.test(text)
-}
-
-// Errors we should NOT retry on — the request itself is bad, so reconnecting
-// would just fail the same way (and could hammer the API).
-function isFatalError(res: SonioxResponse): boolean {
-  const code = res.error_code ?? 0
-  const type = res.error_type ?? ''
-  return code === 400 || code === 401 || code === 403 || type === 'unauthenticated' || type === 'invalid_request'
+function joinText(a: string, b: string, separator = ' '): string {
+  if (!a) return b
+  if (!b) return a
+  return a + (/\s$/.test(a) || /^\s/.test(b) ? '' : separator) + b
 }
 
 export function startSttStream(
   opts: SttOptions,
-  onSnapshot: (snap: SttSnapshot) => void,
-  onError?: (err: unknown) => void,
+  onSnapshot: (snapshot: SttSnapshot) => void,
+  onError?: (error: unknown) => void,
   onStatus?: (status: SttStatus) => void,
 ): SttClient {
-  const { apiKey, targetLang } = opts
-  const model = opts.model || DEFAULT_MODEL
-  const languageHints = opts.languageHints ?? []
-  const splitSentences = opts.splitSentences ?? true
-  const speakerLabels = opts.speakerLabels ?? false
-  const noTranslate = opts.noTranslateLangs ?? []
-
-  if (!apiKey) {
-    onError?.(new Error('Soniox API key missing — set it in Settings'))
+  const url = validateServerUrl(opts.serverUrl)
+  if (!url) throw new Error('Set your WhisperLiveKit server URL in Settings.')
+  if (globalThis.location?.protocol === 'https:' && url.startsWith('ws:')) {
+    throw new Error('An HTTPS app requires a secure wss:// WhisperLiveKit server.')
   }
-
-  // Persistent across reconnects so the transcript continues uninterrupted.
-  let transcriptFinal = ''
-  let translationFinal = ''
-  let lastSpkTx: string | null = null
-  let lastSpkTl: string | null = null
-  const spkOrder = new Map<string, number>()
-
-  let ws: WebSocket | null = null
-  let configSent = false
-  let closedByUs = false
-  let fatal = false
-  let reconnectAttempts = 0
-  let reconnectTimer: number | null = null
+  let socket: WebSocket | null = null
+  let ready = false
+  let stopped = false
+  let finishing = false
+  let attempts = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+  let connectionTimer: ReturnType<typeof setTimeout> | undefined
+  let finishTimer: ReturnType<typeof setTimeout> | undefined
+  let history = ''
+  let sessionFinal = ''
+  let interimText = ''
+  let pendingBytes = 0
   const pending: Uint8Array[] = []
+  const speakers = new Map<number, string>()
 
-  function speakerIcon(spk: string): string {
-    if (!spkOrder.has(spk)) spkOrder.set(spk, spkOrder.size)
-    return SPEAKER_ICONS[spkOrder.get(spk)! % SPEAKER_ICONS.length]
+  function emit(finished = false) {
+    onSnapshot({ finalText: joinText(history, sessionFinal, '\n').slice(-MAX_TEXT), interimText, finished })
   }
-  function appendTranscript(text: string, speaker?: string) {
-    if (speakerLabels && speaker && speaker !== lastSpkTx) {
-      if (transcriptFinal && !transcriptFinal.endsWith('\n')) transcriptFinal += '\n'
-      transcriptFinal += speakerIcon(speaker) + ' '
-      lastSpkTx = speaker
-    }
-    transcriptFinal += text
+  function dispose() {
+    stopped = true
+    ready = false
+    clearTimeout(reconnectTimer)
+    clearTimeout(connectionTimer)
+    clearTimeout(finishTimer)
+    pending.length = 0
+    pendingBytes = 0
+    socket?.close()
+    onStatus?.('closed')
   }
-  function appendTranslation(text: string, speaker?: string) {
-    if (speakerLabels && speaker && speaker !== lastSpkTl) {
-      if (translationFinal && !translationFinal.endsWith('\n')) translationFinal += '\n'
-      translationFinal += speakerIcon(speaker) + ' '
-      lastSpkTl = speaker
-    }
-    translationFinal += text
+  function fail(message: string) {
+    if (stopped) return
+    onError?.(new Error(message))
+    dispose()
   }
-
-  function buildConfig(): string {
-    const config: Record<string, unknown> = {
-      api_key: apiKey,
-      model,
-      audio_format: 'pcm_s16le',
-      sample_rate: 16000,
-      num_channels: 1,
-      enable_endpoint_detection: true,
-    }
-    if (languageHints.length) config.language_hints = languageHints
-    if (targetLang) {
-      config.translation = { type: 'one_way', target_language: targetLang }
-      config.enable_language_identification = true
-    }
-    if (speakerLabels) config.enable_speaker_diarization = true
-    return JSON.stringify(config)
+  function endAudio() {
+    // WLK receive_bytes() requires an empty BINARY frame, not an empty string.
+    socket?.send(new Uint8Array(0))
   }
-
-  function handleMessage(ev: MessageEvent) {
-    let res: SonioxResponse
-    try {
-      const raw = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data as ArrayBuffer)
-      res = JSON.parse(raw)
-    } catch {
-      return
-    }
-
-    if (res.error_code) {
-      if (isFatalError(res)) fatal = true
-      onError?.(
-        new Error(`Soniox ${res.error_code} ${res.error_type ?? ''}: ${res.error_message ?? 'error'}`.trim()),
-      )
-      return
-    }
-
-    let transcriptInterim = ''
-    let translationInterim = ''
-    for (const t of res.tokens ?? []) {
-      const text = t.text
-      if (!text) continue
-      const isTranslation = t.translation_status === 'translation'
-      if (isControlToken(text)) {
-        if (splitSentences && t.is_final && /^<(end|fin)>$/i.test(text)) {
-          if (transcriptFinal && !transcriptFinal.endsWith('\n')) transcriptFinal += '\n'
-        }
-        continue
+  function formatLines(lines: WhisperLine[]) {
+    let text = ''
+    let lastSpeaker: number | undefined
+    for (const line of lines) {
+      if (line.speaker === -2 || typeof line.text !== 'string' || !line.text.trim()) continue
+      let part = line.text.trim()
+      if (opts.speakerLabels && typeof line.speaker === 'number' && line.speaker >= 0 && line.speaker !== lastSpeaker) {
+        if (!speakers.has(line.speaker)) speakers.set(line.speaker, SPEAKER_ICONS[speakers.size % SPEAKER_ICONS.length])
+        part = `${speakers.get(line.speaker)} ${part}`
+        lastSpeaker = line.speaker
       }
-      if (isTranslation) {
-        if (noTranslate.includes(t.source_language ?? '')) continue
-        if (t.is_final) appendTranslation(text, t.speaker)
-        else translationInterim += text
-      } else {
-        if (t.is_final) appendTranscript(text, t.speaker)
-        else transcriptInterim += text
-        const keepAsIs = targetLang && (t.language === targetLang || noTranslate.includes(t.language ?? ''))
-        if (keepAsIs) {
-          if (t.is_final) appendTranslation(text, t.speaker)
-          else translationInterim += text
-        }
-      }
+      text = joinText(text, part, opts.splitSentences ? '\n' : ' ')
     }
-
-    if (transcriptFinal.length > 100_000) transcriptFinal = transcriptFinal.slice(-100_000)
-    if (translationFinal.length > 100_000) translationFinal = translationFinal.slice(-100_000)
-
-    if (res.finished) console.info('[soniox] stream finished')
-    onSnapshot({ transcriptFinal, transcriptInterim, translationFinal, translationInterim, finished: !!res.finished })
+    return text.slice(-MAX_TEXT)
   }
-
   function connect() {
-    if (closedByUs || fatal) return
-    onStatus?.(reconnectAttempts > 0 ? 'reconnecting' : 'connecting')
-    configSent = false
-    const sock = new WebSocket(SONIOX_WS_URL)
-    sock.binaryType = 'arraybuffer'
-    ws = sock
-
-    sock.addEventListener('open', () => {
-      if (ws !== sock) return // superseded
-      reconnectAttempts = 0
-      sock.send(buildConfig())
-      configSent = true
-      onStatus?.('live')
-      console.info(
-        `[soniox] connected — model ${model}` +
-          (targetLang ? `, translate→${targetLang}` : '') +
-          (speakerLabels ? ', diarization on' : ''),
-      )
-      // Flush buffered audio captured during (re)connect.
-      for (const chunk of pending) sock.send(chunk)
-      pending.length = 0
-    })
-
-    sock.addEventListener('message', handleMessage)
-    sock.addEventListener('error', () => {
-      /* a 'close' event follows — reconnect is handled there */
-    })
-    sock.addEventListener('close', () => {
-      if (ws !== sock) return
-      configSent = false
-      if (closedByUs || fatal) {
-        onStatus?.('closed')
+    if (stopped || finishing) return
+    onStatus?.(attempts ? 'reconnecting' : 'connecting')
+    ready = false
+    const current = new WebSocket(url)
+    socket = current
+    current.binaryType = 'arraybuffer'
+    connectionTimer = setTimeout(() => {
+      fail('WhisperLiveKit did not send its PCM configuration. Check the URL, network, and --pcm-input flag.')
+    }, 15_000)
+    current.addEventListener('message', event => {
+      if (stopped || socket !== current) return
+      let response: WhisperResponse
+      try {
+        response = JSON.parse(typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data))
+        if (!response || typeof response !== 'object') return
+      } catch { return }
+      if (response.error || response.status === 'error') {
+        fail(`WhisperLiveKit: ${response.error || 'audio processing failed'}`)
         return
       }
-      scheduleReconnect()
+      if (response.type === 'config') {
+        if (ready) return
+        if (response.useAudioWorklet !== true) {
+          fail('Restart WhisperLiveKit with --pcm-input (16 kHz mono PCM is required).')
+          return
+        }
+        clearTimeout(connectionTimer)
+        ready = true
+        attempts = 0
+        onStatus?.('live')
+        for (const chunk of pending) current.send(chunk)
+        pending.length = 0
+        pendingBytes = 0
+        if (finishing) endAudio()
+        return
+      }
+      if (response.type === 'ready_to_stop') {
+        emit(true)
+        dispose()
+        return
+      }
+      if (Array.isArray(response.lines)) {
+        sessionFinal = formatLines(response.lines)
+        // WLK 0.2.19 can include pending diarization in both lines and buffer.
+        const normalize = (text: string) => text.replace(/\s+/g, ' ').trim()
+        const diarization = response.buffer_diarization || ''
+        const lineText = normalize(response.lines.map(line => line.text || '').join(' '))
+        const extra = lineText.endsWith(normalize(diarization)) ? '' : diarization
+        interimText = joinText(extra, response.buffer_transcription || '')
+        if (interimText && (history || sessionFinal) && !/^\s/.test(interimText)) interimText = ' ' + interimText
+        emit()
+      }
+    })
+    current.addEventListener('error', () => {
+      // Browsers provide no useful error body. The close event drives retry.
+    })
+    current.addEventListener('close', () => {
+      if (stopped || socket !== current) return
+      clearTimeout(connectionTimer)
+      ready = false
+      if (finishing) {
+        fail('WhisperLiveKit disconnected before confirming the final transcript.')
+        return
+      }
+      history = joinText(history, sessionFinal, '\n').slice(-MAX_TEXT)
+      sessionFinal = ''
+      interimText = ''
+      speakers.clear()
+      emit()
+      onStatus?.('reconnecting')
+      const delay = Math.min(8000, 500 * 2 ** attempts++)
+      reconnectTimer = setTimeout(connect, delay)
     })
   }
-
-  function scheduleReconnect() {
-    if (closedByUs || fatal) return
-    onStatus?.('reconnecting')
-    const delay = Math.min(RECONNECT_MAX_MS, 500 * 2 ** reconnectAttempts)
-    reconnectAttempts++
-    if (reconnectTimer !== null) clearTimeout(reconnectTimer)
-    reconnectTimer = window.setTimeout(connect, delay)
-  }
-
   connect()
-
   return {
-    sendPcm(chunk: Uint8Array) {
-      if (closedByUs || fatal) return
-      if (ws && ws.readyState === WebSocket.OPEN && configSent) {
-        if (ws.bufferedAmount > BACKPRESSURE_BYTES) return // network backed up → drop to bound latency
-        ws.send(chunk)
+    sendPcm(chunk) {
+      if (stopped || finishing || !chunk.byteLength) return
+      if (socket?.readyState === WebSocket.OPEN && ready) {
+        if (socket.bufferedAmount <= BACKPRESSURE_BYTES) socket.send(chunk)
       } else {
-        // (re)connecting → buffer, capped so memory stays bounded.
-        if (pending.length >= MAX_PENDING_CHUNKS) pending.shift()
-        pending.push(chunk.slice())
+        // Keep at most five seconds of the newest audio while connecting.
+        const copy = chunk.slice(-MAX_PENDING_BYTES)
+        while (pending.length && pendingBytes + copy.byteLength > MAX_PENDING_BYTES) pendingBytes -= pending.shift()!.byteLength
+        pending.push(copy)
+        pendingBytes += copy.byteLength
       }
     },
-    close() {
-      closedByUs = true
-      if (reconnectTimer !== null) {
-        clearTimeout(reconnectTimer)
-        reconnectTimer = null
+    finish() {
+      if (stopped || finishing) return
+      if (!socket || socket.readyState > WebSocket.OPEN) {
+        fail('Cannot finish while disconnected from WhisperLiveKit.')
+        return
       }
-      try {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send('')
-        else ws?.close()
-      } catch {
-        /* already closing */
-      }
+      finishing = true
+      clearTimeout(reconnectTimer)
+      finishTimer = setTimeout(() => fail('Timed out waiting for WhisperLiveKit to finish processing audio.'), 60_000)
+      if (ready) endAudio()
     },
+    close: dispose,
   }
 }

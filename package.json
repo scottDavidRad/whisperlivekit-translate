@@ -1,14 +1,18 @@
 {
-  "name": "soniox-translate",
+  "name": "whisperlivekit-translate",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "pack": "evenhub pack",
-    "simulate": "evenhub-simulator http://localhost:5173"
+    "pack": "evenhub pack app.json dist -o whisperlivekit-translate.ehpk",
+    "simulate": "evenhub-simulator http://localhost:5173",
+    "test": "tsx --test tests/*.test.ts",
+    "smoke": "tsx scripts/whisperlivekit-smoke.ts",
+    "server": "./scripts/start-server.sh",
+    "smoke:app": "node --import tsx scripts/browser-smoke.mjs"
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.10",
@@ -17,7 +21,12 @@
   "devDependencies": {
     "@evenrealities/evenhub-cli": "^0.1.12",
     "@evenrealities/evenhub-simulator": "^0.7.2",
+    "jsdom": "^30.1.0",
+    "tsx": "^4.23.14",
     "typescript": "^5.7.0",
-    "vite": "^5.4.0"
+    "vite": "^7.3.6"
+  },
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   }
 }

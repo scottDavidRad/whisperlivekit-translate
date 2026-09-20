@@ -14,3 +14,8 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# Local speech runtime and test artifacts
+.venv/
+__pycache__/
+.test-output/
