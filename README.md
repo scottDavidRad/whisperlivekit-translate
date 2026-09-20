@@ -1,130 +1,162 @@
-# Soniox Translate
+# WhisperLiveKit Translate
 
-**Real-time translation — with live captions — for the [Even Realities G2](https://www.evenrealities.com) smart glasses.**
+Live captions and English speech translation for Even Realities G2 glasses, using a self-hosted [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) server.
 
-Listen to someone speaking another language and the translation appears on your lens as they speak, with the original transcript right above it. Like subtitles for the real world.
+This is [Scott Rad's fork](https://github.com/scottDavidRad/whisperlivekit-translate) of [Intel Chen's Soniox Translate](https://github.com/intelc/soniox-translate). The speech connection, settings, and setup have been replaced with WhisperLiveKit. No Soniox account, API key, or service is used.
 
-> ## ⚡ Virtually real-time — not seconds behind
->
-> Even Realities' built-in translation has a **noticeable lag**: the translated words land on your lens a second or two *after* they're spoken. **Soniox Translate streams every word the moment it's said**, so the translation keeps pace with the conversation instead of trailing it. Side by side, ours reads like live subtitles — the stock feature reads like a delayed replay.
+The app sends microphone audio to your configured server and displays its output in one glasses pane and a companion phone mirror. It supports live captions in the source language or Whisper's native translation into English. Translation is a **server-wide setting**: the app's Transcript / Translation selector labels the output and must match the server. It does not change the model's task. This version does not provide simultaneous original and translated text or arbitrary translation targets.
 
-Built for [Even Hub](https://hub.evenrealities.com), powered by [Soniox](https://soniox.com) real-time speech AI (60+ languages).
+## Requirements
 
-<p align="center">
-  <img src="assets/screenshots/preview-2.png" width="46%" alt="Chinese → English on the G2 display" />
-  <img src="assets/screenshots/preview-1.png" width="46%" alt="Spanish → English on the G2 display" />
-</p>
+- Node.js 22.13 or newer, with npm.
+- Python 3.12 for the local speech server.
+- A computer reachable from the phone, normally on the same private Wi-Fi network.
+- The Even Realities companion app and G2 glasses, or the Even Hub desktop simulator.
+- `ffmpeg` for the audio smoke test. macOS can generate its test speech with `say`; other systems need a speech recording.
 
-> The glasses display is 576×288, 4-bit greyscale (bright green on a transparent, see-through lens). The original language sits up top, the translation below — the empty middle is the real world showing through.
+WhisperLiveKit and its inference dependencies are pinned in [requirements.txt](requirements.txt). Model files may download on first launch. Inference speed and recognition accuracy depend on the model, computer, audio, and language.
 
-## Features
+## Install and start the server
 
-- ⚡ **Real-time translation** to 24+ target languages (60+ supported by Soniox) — words appear as they're spoken, not a beat behind
-- 🪟 **Translation-first split view** (original on top, translation below) or a clean **full-screen** translation
-- 🎙️ **Live transcription** of the original language too, hands-free
-- 🗣️ **Keep-as-is languages** — translate everything *except* the ones you choose
-- 👥 Optional **speaker labels** (per-speaker icons) and **sentence-by-sentence** layout
-- 🎚️ Tunable display — alignment, text width, line spacing, max lines, and a **bottom-anchored** caption flow that keeps the newest line in a fixed spot
-- 📱 **Companion phone screen** for setup + a live transcript mirror
-- 🔑 **Bring your own Soniox key** — your audio streams under *your* account, so you control usage and data
-- 🔌 **Resilient connection** — auto-reconnect with backoff, backpressure handling, and serialized BLE calls
-
-## How it works
-
-```
-G2 mic ─(PCM s16le 16kHz)─▶ WebView app ─▶ Soniox real-time WS (wss://stt-rt.soniox.com)
-                                │                       │  transcript + translation tokens
-                                ◀───────────────────────┘
-                                ▼
-              two text containers on the 576×288 lens (textContainerUpgrade)
-              + a companion phone UI (settings + live mirror)
+```sh
+git clone https://github.com/scottDavidRad/whisperlivekit-translate.git
+cd whisperlivekit-translate
+npm ci
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+npm run server
 ```
 
-The app is a plain HTML + TypeScript page (Vite) that runs inside the Even companion app's WebView and talks to the glasses through the Even Hub SDK. Microphone audio (PCM s16le @ 16 kHz mono — the G2's native format) streams straight to Soniox's WebSocket API; the returned tokens are split into an original-language stream and a translated stream and rendered on the lens.
+The server script binds to `0.0.0.0:8000` and starts WhisperLiveKit with raw PCM input, `faster-whisper`, the `localagreement` streaming policy, and the multilingual `base` model. The source language is detected automatically unless you provide `--lan`.
 
-## Quick start
+For Spanish speech translated into English, stop the captions server and start:
 
-Requires Node 20+ and a free Soniox API key ([console.soniox.com](https://console.soniox.com)).
-
-```bash
-npm install
-cp .env.example .env.local        # paste your Soniox key into VITE_STT_API_KEY (dev only)
-
-npm run dev                       # Vite dev server at http://localhost:5173
-npm run simulate                  # desktop G2 simulator (renders the 576×288 lens)
+```sh
+npm run server -- --lan es --direct-english-translation
 ```
 
-> `VITE_STT_API_KEY` is a **dev-only** convenience so the simulator works without typing a key. Production builds ignore it — every user enters their own key in the app's Settings, so they're billed for their own usage.
+Use a multilingual model for translation, such as `base`; an English-only `.en` model is not suitable. You can override script defaults, for example `npm run server -- --model small --lan es --direct-english-translation`. Larger models require more resources.
 
-**On real glasses** (laptop + phone on the same Wi-Fi, no AP isolation):
+Keep `--pcm-input` enabled. The glasses send mono, 16 kHz, signed 16-bit little-endian PCM; the client checks the server's PCM configuration before sending audio. This fork uses native English translation, not WhisperLiveKit 0.2.19's unfinished arbitrary-target translation option.
 
-```bash
-npx @evenrealities/evenhub-cli qr --url "http://<your-lan-ip>:5173"
+## Open the app
+
+In a second terminal:
+
+```sh
+npm run dev
 ```
 
-Scan the QR from the Even Realities app (Developer Mode → Scan); the app hot-loads on your G2.
+For desktop development:
 
-**Validate Soniox alone** (no glasses needed — synthesizes speech with macOS `say`):
-
-```bash
-node scripts/soniox-smoke.mjs "hello from soniox"
-SONIOX_TRANSLATE_TO=en SAY_VOICE="Mónica" node scripts/soniox-smoke.mjs "Hola, esto es una prueba."
+```sh
+npm run simulate
 ```
 
-## Settings (in the phone app)
+For the phone and glasses, replace the address below with your computer's LAN IP:
 
-Everything is configured in the companion Settings panel and persisted per-user via the SDK's storage. No env vars beyond the dev key.
-
-| Setting | Default | Notes |
-|---|---|---|
-| Soniox API key | — | your own key; required to start |
-| Translate to | English | target language (`None` = transcript only) |
-| Don't translate | — | language codes to keep as-is, e.g. `es, fr` (target is always kept) |
-| Show original transcript | on | off = translation full-screen |
-| Alignment | Left | Left / Center (center via space-padding) |
-| Anchor | Bottom | newest line pinned to the bottom (grows up) / Top |
-| Line spacing | Normal | blank lines between sentences (Normal / Relaxed / Loose) |
-| Text width | Full | Full / Wide / Medium / Narrow (centered column) |
-| Max lines | Auto | cap the main pane to the last N lines |
-| Split sentences | on | newline per sentence |
-| Label speakers | off | per-speaker icons (`● ■ ★ …`) — best with 2+ speakers |
-
-## Build & package for Even Hub
-
-```bash
-npm run build                                  # tsc + Vite production build → dist/
-npx @evenrealities/evenhub-cli pack app.json dist -o soniox-translate.ehpk
+```sh
+npx @evenrealities/evenhub-cli qr --url "http://192.168.1.20:5173"
 ```
 
-Upload the `.ehpk` on [hub.evenrealities.com](https://hub.evenrealities.com). The production build ships **no API key** — verify with `grep <key> dist/` (should be empty).
+Open the QR code through the Even Realities app's developer mode. The Vite server listens on the local network. A normal browser does not supply the Even SDK bridge; use the simulator or companion app for the full application.
 
-## Screenshots
+In the app's **Settings**:
 
-| Spanish → English | Chinese → English | French → English |
-|---|---|---|
-| ![es](assets/screenshots/preview-1.png) | ![zh](assets/screenshots/preview-2.png) | ![fr](assets/screenshots/preview-3.png) |
+1. Set **Server WebSocket URL** to `ws://192.168.1.20:8000/asr`, using your computer's actual address. `localhost` on the phone refers to the phone, not the computer.
+2. Choose **Transcript** for a captions server, or **Translation** for a server launched with `--direct-english-translation`.
+3. Save. The visible status explains connection and setup errors.
 
-## Project layout
+The server controls source language, translation mode, model, and diarization. The phone settings also control sentence splitting, speaker labels, alignment, vertical anchor, line spacing, text width, and maximum lines. Speaker labels require diarization enabled on the server. Settings are stored per user through the Even SDK.
 
-| Path | What |
+Optionally copy `.env.example` to `.env.local` and set `VITE_WHISPERLIVEKIT_URL` as the default endpoint. It is a client-visible URL, not a secret. An entered endpoint takes precedence.
+
+## Network and privacy
+
+The app sends microphone audio directly to the WhisperLiveKit endpoint you configure. Speech inference runs on that server. This client does not require an API key or add authentication to the connection.
+
+Use `ws://` with an HTTP app on a trusted LAN. An app served over HTTPS requires a `wss://` endpoint with a trusted certificate. Keep the speech server on a private network; before exposing it externally, provide TLS and suitable access controls, such as a private network gateway. The development script listens on all network interfaces.
+
+`app.json` contains microphone and network permissions and no Soniox domain. Allowed network hosts are deployment-specific; an Even Hub deployment may require you to whitelist the actual server host. Configure that for your deployment rather than assuming an arbitrary endpoint will be allowed.
+
+## Verify
+
+```sh
+npm test
+npm run build
+npm run pack
+```
+
+The package is written to `whisperlivekit-translate.ehpk`. Build before packing. See [VERIFICATION.md](VERIFICATION.md) for measured results and the remaining hardware checks.
+
+With the speech server running, this smoke test uses the **same WebSocket client as the app**, streams speech at real-time speed, and waits for the final server result:
+
+```sh
+# macOS: uses say to generate speech, then ffmpeg to convert it to PCM.
+EXPECT_TEXT='quick brown fox' npm run smoke -- "The quick brown fox jumps over the lazy dog."
+
+# Any platform with ffmpeg: use a recorded speech file.
+AUDIO_FILE=/path/to/speech.wav npm run smoke
+
+# Use a different server endpoint.
+WHISPERLIVEKIT_URL=ws://192.168.1.20:8000/asr AUDIO_FILE=/path/to/speech.wav npm run smoke
+```
+
+`AUDIO_FILE` may be any speech file that your `ffmpeg` installation can decode. Without it, the script uses macOS `say`; `SAY_VOICE` selects a voice installed on that Mac. For example, after starting the Spanish-to-English server above:
+
+```sh
+SAY_VOICE='Mónica' EXPECT_TEXT='good morning' npm run smoke -- \
+  "Hola, buenos días. Esta es una prueba de traducción. Muchas gracias."
+```
+
+For Russian-to-English translation, restart the server with:
+
+```sh
+npm run server -- --model base --lan ru --direct-english-translation
+```
+
+Then run the test with macOS's installed `Milena` voice:
+
+```sh
+SAY_VOICE=Milena EXPECT_TEXT='(?=.*good morning)(?=.*help)' npm run smoke -- \
+  "Доброе утро. Это проверка перевода с русского на английский. Спасибо за помощь."
+```
+
+`EXPECT_TEXT` is an optional case-insensitive regular expression checked against the final text. The script fails on server errors, timeout, empty recognition, or a failed expected-text check. A passing smoke test verifies the speech path; it does not measure translation quality or prove the physical glasses connection.
+
+The full application smoke test also runs `main.ts` and the real SDK event parser, feeds audio events into the app, and checks the phone text, glasses update calls, and foreground-exit shutdown. It uses jsdom and stubs the native microphone/glasses bridge, so it does not replace a hardware test:
+
+```sh
+# Run against the Russian-to-English server above.
+OUTPUT_MODE=translation WHISPERLIVEKIT_URL=ws://127.0.0.1:8000/asr \
+  SAY_VOICE=Milena EXPECT_TEXT='(?=.*good morning)(?=.*help)' npm run smoke:app -- \
+  "Доброе утро. Это проверка перевода с русского на английский. Спасибо за помощь."
+```
+
+## Implementation
+
+```text
+G2 microphone → Even SDK / phone WebView → WhisperLiveKit /asr WebSocket
+                                                ↓
+                     cumulative text snapshots + provisional text
+                                                ↓
+                           one glasses pane + phone text mirror
+```
+
+| File | Purpose |
 |---|---|
-| `src/asr/stt.ts` | Soniox real-time client (WS, translation, reconnect, backpressure) |
-| `src/main.ts` | Glasses layout, text fitting/autoscroll, serial BLE queue, lifecycle |
-| `src/ui.ts` | Companion phone UI (settings + live mirror) |
-| `src/settings.ts`, `src/languages.ts` | Settings model / target-language list |
-| `app.json` | Even Hub manifest (`g2-microphone` + `network` permissions) |
-| `assets/` | App icon + store screenshots |
+| `src/asr/stt.ts` | WhisperLiveKit protocol, PCM streaming, snapshots, reconnect, backpressure, shutdown |
+| `src/main.ts` | Even SDK lifecycle, glasses layout, text fitting, serialized display updates |
+| `src/ui.ts`, `src/settings.ts` | Phone settings, endpoint validation, live text mirror |
+| `scripts/start-server.sh` | Local server defaults |
+| `scripts/whisperlivekit-smoke.ts` | Real speech test through the app's client |
+| `scripts/browser-smoke.mjs` | Full application speech test with a stubbed native bridge |
+| `tests/` | Protocol and UI regression checks |
 
-## Privacy
+Old screenshots in the repository are historical upstream assets; they do not represent this fork's interface or capabilities.
 
-Microphone audio is captured only while the app is open and is sent to Soniox for transcription/translation. Your Soniox API key is stored only on your device.
+## Credits and license
 
-## Credits
+Based on Intel Chen's [Soniox Translate](https://github.com/intelc/soniox-translate), with the original copyright and [MIT license](LICENSE) retained. Speech processing uses [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit). Glasses integration uses the Even Hub SDK; text measurement uses `@evenrealities/pretext`.
 
-- [Even Realities](https://www.evenrealities.com) / [Even Hub](https://hub.evenrealities.com) — G2 glasses + SDK
-- [Soniox](https://soniox.com) — real-time speech-to-text & translation
-- Text measurement via [`@evenrealities/pretext`](https://www.npmjs.com/package/@evenrealities/pretext)
-
-## License
-
-[MIT](LICENSE) — not affiliated with or endorsed by Even Realities or Soniox.
+This project is not affiliated with or endorsed by Even Realities, Soniox, or the WhisperLiveKit maintainers.

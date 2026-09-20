@@ -1,46 +1,32 @@
-# Store listing — Soniox Translate
+# Store listing — Whisper Translate
 
-## Short description (tagline)
-Real-time translation, right on your G2 lens — as the words are spoken.
+Draft listing for the WhisperLiveKit fork. Physical G2 verification and deployment-specific network permissions remain required before release.
+
+## Short description
+
+Live captions and English speech translation on G2, using your own WhisperLiveKit server.
 
 ## Full description
 
-Soniox Translate turns your Even Realities G2 into a real-time translation
-display. Listen to someone speaking another language — or speak yourself — and
-the translation appears on your lens as the words are said, with the original
-transcript right above it.
+Whisper Translate connects your Even Realities G2 microphone to a WhisperLiveKit server that you run. Read live captions in the spoken language, or start the server in native English translation mode to display English text.
 
-Powered by Soniox's real-time speech AI, it translates across 60+ languages with
-very low latency, so the text keeps pace with the conversation instead of
-trailing behind it. Reading a foreign menu, traveling, or talking with someone
-in another language? The original appears up top and the English (or any target
-you choose) appears below — like subtitles for the real world.
+The glasses show one text pane, with a matching live text display and connection status on your phone. Adjust text alignment, width, spacing, line count, sentence splitting, and vertical position. Speaker labels are available when the server provides diarization.
 
-**What it does**
-- Real-time translation to 24+ target languages (60+ supported) — words appear as they're spoken
-- Translation-first split view, or a clean full-screen translation
-- Live transcription of the original language on the glasses, hands-free
-- Keep chosen languages untranslated (e.g. translate everything but your own)
-- Optional speaker labels and sentence-by-sentence layout
-- Tune it your way: alignment, text width, line spacing, max lines, and a
-  bottom-anchored caption flow that keeps the newest line in a fixed spot
-- Companion phone screen for setup and a live transcript mirror
-- Double-tap the temple to exit
+## Setup required
 
-**Bring your own key**
-Soniox Translate uses your own Soniox API key (free to start at
-console.soniox.com). Your microphone audio streams directly to Soniox under
-your account — so you control your usage and your data. Add your key once in
-Settings and you're live.
+You need a computer running WhisperLiveKit, reachable from the phone. Enter its WebSocket address in the app's Settings. No Soniox account or API key is required.
 
-**Privacy**
-Audio is captured only while the app is open and is sent to Soniox for
-transcription/translation. Your API key is stored only on your phone.
+The server chooses the model, source language, and speech task. To translate into English, start it with `--direct-english-translation` and select Translation in the app. That selector labels the output; it does not reconfigure the server. This version does not show the original and translation together or translate to arbitrary target languages.
 
----
+Speech recognition, translation accuracy, and delay depend on the model, computer, and audio quality. Text may change as the model processes more speech.
 
-## Notes for submission
-- Mentions the backend (Soniox) + that audio is streamed there — matches the
-  reviewer requirement to document backend domains / data flow.
-- "Bring your own key" framing makes the per-user billing model explicit.
-- If a shorter blurb is needed, use the tagline above.
+## Privacy and network
+
+Microphone audio is streamed to the WhisperLiveKit server address you configure for speech processing. Keep the server private or protect external access with TLS and appropriate access controls. HTTPS app hosting requires a secure `wss://` endpoint.
+
+## Submission notes
+
+- Configure any required Even Hub host allowlist for the actual server deployment. No Soniox domain is used.
+- Replace historical upstream screenshots with screenshots of this fork before submission.
+- See [VERIFICATION.md](../VERIFICATION.md) for software verification and remaining hardware checks.
+- This fork is based on [Intel Chen's Soniox Translate](https://github.com/intelc/soniox-translate), with its MIT license and copyright retained.
