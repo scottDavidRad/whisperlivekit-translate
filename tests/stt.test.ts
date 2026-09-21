@@ -230,3 +230,96 @@ test('unsupported manual language is rejected before opening any socket', () => 
   assert.throws(() => start({ sourceLanguage: 'made-up' }), /Unsupported input/)
   assert.equal(FakeSocket.sockets.length, 0)
 })
+
+function identityState(socket: FakeSocket, speakers: unknown[], profiles: unknown[] = []) {
+  socket.message({ type: 'speaker_state', status: 'ready', speakers, profiles })
+}
+function readyWithRecognition(socket: FakeSocket) {
+  socket.open(); socket.message({ type: 'config', useAudioWorklet: true, speaker_recognition: true })
+}
+
+test('saved names update captions without new speech, and forget removes the name', () => {
+  const socket = start({ speakerLabels: true, rememberSpeakers: true }); readyWithRecognition(socket)
+  assert.equal(new URL(socket.url).searchParams.get('remember_speakers'), '1')
+  socket.message({ lines: [{ text: 'Привет.', speaker: 3 }] })
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: Привет.')
+  identityState(socket, [{ speaker: 3, name: 'Джон', profile_id: 'john', seconds: 5 }], [{ id: 'john', name: 'Джон' }])
+  assert.equal(snapshots.at(-1)!.finalText, 'Джон: Привет.')
+  assert.equal(client!.forgetSpeaker('john'), true)
+  const request = JSON.parse(socket.sent.at(-1) as string)
+  assert.equal(request.type, 'speaker_forget')
+  identityState(socket, [{ speaker: 3, seconds: 5 }])
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: Привет.')
+})
+
+test('enrollment targets the displayed speaker mapping and errors leave ASR live', () => {
+  const results: unknown[] = []
+  const socket = start({ speakerLabels: true, rememberSpeakers: true, onSpeakerResult: (r: unknown) => results.push(r) })
+  readyWithRecognition(socket)
+  socket.message({ lines: [{ text: 'Hello.', speaker: 4 }] })
+  assert.equal(client!.enrollSpeaker(1, 'John'), true)
+  const request = JSON.parse(socket.sent.at(-1) as string)
+  assert.equal(request.speaker, 4)
+  socket.message({ type: 'speaker_result', action: 'enroll', request_id: request.request_id, ok: false, message: 'More clear speech needed.' })
+  assert.deepEqual(results.at(-1), { action: 'enroll', ok: false, message: 'More clear speech needed.' })
+  assert.deepEqual(errors, [])
+  client!.sendPcm(new Uint8Array([1, 2]))
+  assert.ok(socket.sent.at(-1) instanceof Uint8Array)
+  assert.equal(client!.enrollSpeaker(99, 'John'), false)
+})
+
+test('new connections require fresh recognition before reusing any saved name', () => {
+  const socket = start({ speakerLabels: true, rememberSpeakers: true }); readyWithRecognition(socket)
+  socket.message({ lines: [{ text: 'Before.', speaker: 1 }] })
+  identityState(socket, [{ speaker: 1, name: 'John', profile_id: 'john', seconds: 6 }])
+  socket.close(); mock.timers.tick(500)
+  const next = FakeSocket.sockets.at(-1)!; readyWithRecognition(next)
+  next.message({ lines: [{ text: 'Different voice.', speaker: 1 }] })
+  assert.equal(snapshots.at(-1)!.finalText, 'John: Before.\nSpeaker 2: Different voice.')
+  assert.equal(client!.enrollSpeaker(1, 'John'), false, 'An old display number must not target a reused raw slot')
+  identityState(next, [{ speaker: 1, seconds: 5 }, { speaker: 4, name: 'John', profile_id: 'john', seconds: 6 }])
+  next.message({ lines: [{ text: 'Different voice.', speaker: 1 }, { text: 'John returns.', speaker: 4 }] })
+  assert.equal(snapshots.at(-1)!.finalText, 'John: Before.\nSpeaker 2: Different voice.\nJohn: John returns.')
+})
+
+test('spoken naming phrases never enroll automatically; identity assignment is through the app', () => {
+  const socket = start({ speakerLabels: true, rememberSpeakers: true }); readyWithRecognition(socket)
+  identityState(socket, [{ speaker: 4, seconds: 5 }])
+  socket.message({ lines: [{ text: 'Person one is John.', speaker: 4 }] })
+  socket.message({ lines: [{ text: 'Спикер один это Джон.', speaker: 4 }] })
+  assert.equal(socket.sent.length, 0)
+  assert.equal(client!.enrollSpeaker(1, 'John'), true)
+  assert.equal(JSON.parse(socket.sent.at(-1) as string).speaker, 4)
+})
+
+test('older backend and disabled recognition preserve anonymous captions without fatal errors', () => {
+  const results: unknown[] = []
+  const socket = start({ speakerLabels: true, rememberSpeakers: true, onSpeakerResult: (r: unknown) => results.push(r) }); ready(socket)
+  socket.message({ lines: [{ text: 'Person one is John.', speaker: 2 }] })
+  assert.equal(socket.sent.length, 0)
+  assert.equal(client!.enrollSpeaker(1, 'John'), false)
+  assert.equal(errors.length, 0)
+  assert.equal(statuses.at(-1), 'live')
+  client!.close()
+  const disabled = start({ speakerLabels: true, rememberSpeakers: false }); readyWithRecognition(disabled)
+  identityState(disabled, [{ speaker: 2, name: 'John', seconds: 5 }])
+  disabled.message({ lines: [{ text: 'Hello.', speaker: 2 }] })
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: Hello.')
+  assert.equal(new URL(disabled.url).searchParams.has('remember_speakers'), false)
+})
+
+test('turning recognition off overrides a stale opt-in parameter in the saved server URL', () => {
+  const socket = start({ serverUrl: 'ws://localhost:8000/asr?remember_speakers=1', rememberSpeakers: false })
+  assert.equal(new URL(socket.url).searchParams.has('remember_speakers'), false)
+})
+
+test('a backend without advertised recognition cannot override unavailable status or apply names', () => {
+  const states: Array<{ status: string }> = []
+  const socket = start({ speakerLabels: true, rememberSpeakers: true, onSpeakers: (state: { status: string }) => states.push(state) })
+  ready(socket)
+  socket.message({ type: 'speaker_state', status: 'disabled', speakers: [], profiles: [] })
+  identityState(socket, [{ speaker: 1, name: 'John', seconds: 5 }])
+  socket.message({ lines: [{ text: 'Hello.', speaker: 1 }] })
+  assert.equal(states.at(-1)!.status, 'unavailable')
+  assert.equal(snapshots.at(-1)!.finalText, 'Speaker 1: Hello.')
+})

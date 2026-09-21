@@ -33,6 +33,7 @@ PROVIDER_KEYS = {
     'CONVERSATION_MODEL', 'CONVERSATION_API_KEY', 'CONVERSATION_ALLOW_KEYLESS',
     'OPENAI_API_KEY', 'XAI_API_KEY', 'GROK_MODEL', 'QWEN_BASE_URL', 'QWEN_MODEL', 'QWEN_API_KEY',
     'DASHSCOPE_API_KEY',
+    'SPEAKER_PROFILES_PATH', 'SPEAKER_MODEL_PATH', 'SPEAKER_MATCH_THRESHOLD', 'SPEAKER_MATCH_MARGIN',
 }
 
 project = Path(os.environ['WLK_SERVICE_PROJECT'])
@@ -62,7 +63,7 @@ if source_env.exists():
         key, separator, value = line.partition('=')
         key, value = key.strip(), value.strip()
         if not separator or key not in PROVIDER_KEYS:
-            raise SystemExit('server.env contains an unsupported provider setting.')
+            raise SystemExit('server.env contains an unsupported backend setting.')
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
             value = value[1:-1]
         if '\x00' in value:

@@ -13,6 +13,20 @@ function normalize(text: string): string {
     .map(line => line.replace(/\s+/g, ' ').trim()).filter(Boolean).join('\n')
 }
 
+/** A saved identity can rename several earlier turns at once. Align the read
+ * cursor by speech characters so these metadata changes never replay a page. */
+function speechPositions(text: string): { text: string; positions: number[] } {
+  const positions: number[] = []
+  let previous = 0
+  for (const match of text.matchAll(/(?:^|\n)(?:Speaker (?:\d+|pending)|[\p{L}\p{M}][\p{L}\p{M} '\u2019-]{0,39}): ?/gu)) {
+    const start = match.index + (match[0].startsWith('\n') ? 1 : 0)
+    for (let i = previous; i < start; i++) positions.push(i)
+    previous = match.index + match[0].length
+  }
+  for (let i = previous; i < text.length; i++) positions.push(i)
+  return { text: positions.map(index => text[index]).join(''), positions }
+}
+
 /** A display cursor over cumulative, revisable confirmed speech. Phone history
  * remains authoritative; only unread text is paginated here. */
 export class CaptionPager {
@@ -97,6 +111,16 @@ export class CaptionPager {
     let prefix = 0
     while (prefix < previous.length && prefix < next.length && previous[prefix] === next[prefix]) prefix++
     if (this.cursor <= prefix) return
+    if (this.cursor > 0 && previous !== next) {
+      const before = speechPositions(previous)
+      const after = speechPositions(next)
+      if (before.text && after.text.startsWith(before.text)) {
+        const offset = before.positions.findIndex(position => position >= this.cursor)
+        this.cursor = offset < 0 ? (after.positions[before.positions.length] ?? next.length)
+          : (after.positions[offset] ?? next.length)
+        return
+      }
+    }
     let suffix = 0
     while (suffix < previous.length - prefix && suffix < next.length - prefix &&
            previous[previous.length - 1 - suffix] === next[next.length - 1 - suffix]) suffix++
@@ -124,9 +148,9 @@ export class CaptionPager {
     let start = this.cursor
     while (/\s/.test(this.source[start] ?? '') && start < this.source.length) start++
     let speaker = ''
-    for (const match of this.source.slice(0, start).matchAll(/(?:^|\n)(Speaker (?:\d+|pending):)/g)) speaker = match[1]
+    for (const match of this.source.slice(0, start).matchAll(/(?:^|\n)((?:Speaker (?:\d+|pending)|[\p{L}\p{M}][\p{L}\p{M} '\u2019-]{0,39}):)/gu)) speaker = match[1]
     const remaining = this.source.slice(start)
-    const prefix = includeContinuationLabel && speaker && !/^Speaker (?:\d+|pending):/.test(remaining)
+    const prefix = includeContinuationLabel && speaker && !/^(?:Speaker (?:\d+|pending)|[\p{L}\p{M}][\p{L}\p{M} '\u2019-]{0,39}):/u.test(remaining)
       ? `${speaker} ` : ''
     const display = prefix + remaining
     const lines: string[] = []

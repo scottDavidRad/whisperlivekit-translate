@@ -62,7 +62,28 @@ WLK_BACKEND=mlx-whisper npm run server
 
 The standard launcher uses faster-whisper on CPU. The requirements also install MLX Whisper on Apple silicon; select it with `WLK_BACKEND=mlx-whisper`. The adapter forwards each connection's speech task to MLX and keeps its decode context independent. English-only `.en` models are unsuitable for multilingual translation. Bigger models and extra diarization work require more resources. See [VERIFICATION.md](VERIFICATION.md) for measured results and performance limits rather than assuming real-time performance on every computer.
 
-Sortformer uses `nvidia/diar_streaming_sortformer_4spk-v2`, supporting up to four voices per connection. **Speaker 1**, **Speaker 2**, and **Speaker pending** are anonymous voice labels, not personal identities. Returning from the background keeps the session text but starts fresh voice numbering for the new connection; voices are not matched across connections.
+Sortformer uses `nvidia/diar_streaming_sortformer_4spk-v2`, supporting up to four voices per connection. **Speaker 1**, **Speaker 2**, and **Speaker pending** are anonymous labels. Their numbers can change when a new connection begins. Saved voice profiles can recover a name independently of that number; uncertain matches remain anonymous.
+
+## Remember a speaker
+
+In the phone app's **Speakers** panel, select a **Current voice**, enter its name, and choose **Remember voice**. Let that person speak alone for several seconds first; enrollment needs at least four seconds of usable speech and may ask for more. Assign names using these app controls. Spoken naming sentences are treated as ordinary conversation.
+
+When **Recognize saved voices** is enabled in Settings, a later conversation can display that saved name after enough clear speech arrives. Anonymous captions continue while the recognition model loads or a match is pending. The same person may occupy a different numbered speaker slot in the next session. Voice similarity is an estimate, not proof of identity, and overlapping voices or poor audio can prevent a match.
+
+Use **Saved voices → Rename** to change a saved name. **Forget** removes its profile from the backend; recognizing that person again requires a new enrollment. Turning recognition off stops matching for that connection but does not delete saved profiles.
+
+The backend uses the public [NVIDIA TitaNet speaker model](https://huggingface.co/nvidia/speakerverification_en_titanet_large), through the existing NeMo installation. Its first download is about 97 MiB. It runs on CPU in a separate worker from speech recognition. The model is documented for English; the Russian synthetic checks in [VERIFICATION.md](VERIFICATION.md) do not establish accuracy for every language or real person.
+
+Profiles contain the supplied name and a normalized voice embedding, stored locally on the backend with file permissions `0600`. Captured speech used for matching stays in bounded memory; the recognition feature does not save microphone recordings. The store belongs to the backend deployment, so clients using that server share its saved profiles. Operator overrides in `server.env` are:
+
+```sh
+# Default local profile store; choose another path to isolate deployments.
+SPEAKER_PROFILES_PATH=~/.local/share/whisperlivekit-translate/speakers.json
+# Optional predownloaded model for an offline deployment.
+SPEAKER_MODEL_PATH=/absolute/path/to/titanet-l.nemo
+```
+
+The default cosine threshold is `0.75`, with a `0.10` margin over the next candidate. `SPEAKER_MATCH_THRESHOLD` and `SPEAKER_MATCH_MARGIN` are operator settings; the supplied synthetic test is not a broad calibration dataset.
 
 ## Deploy the phone app
 
@@ -121,7 +142,7 @@ On the tested M4 Mac mini, four recordings reached their final result in 8.93–
 
 ## Network and privacy
 
-Microphone audio goes to the configured WhisperLiveKit server for speech processing. When Conversate assistance is enabled, transcript excerpts and Prep notes go from the backend to the selected AI provider. Provider credentials remain on the backend.
+Microphone audio goes to the configured WhisperLiveKit server for speech processing. Saved voice matching runs there, and a profile is persisted only when you choose to remember a voice. When Conversate assistance is enabled, transcript excerpts and Prep notes go from the backend to the selected AI provider. Provider credentials remain on the backend.
 
 Use `ws://` with an HTTP app on a trusted LAN. An HTTPS app requires a `wss://` endpoint with a trusted certificate. Keep the server private or protect it with TLS and appropriate access controls. The development launcher and Mac service example bind to loopback by default. To serve directly on a trusted LAN or tailnet, explicitly pass `--host` with that interface's address, for example `npm run server -- --host <private-interface-ip>`.
 
@@ -138,7 +159,7 @@ npm run pack
 
 The package is `whisperlivekit-translate.ehpk`. Build before packing. The checks and remaining limits are recorded in [VERIFICATION.md](VERIFICATION.md).
 
-The current verification includes 69 client tests, 27 backend tests, four real speech recordings through the private Mac mini, a complete Conversate speech-plus-Codex test, the Russian confirmed-page application path, and Russian translation visible in the native simulator. Physical G2 hardware has not been tested.
+The verification record includes client/backend tests, real speech recordings through the private Mac mini, a complete Conversate speech-plus-Codex test, the Russian confirmed-page application path, and Russian translation visible in the native simulator. Physical G2 hardware has not been tested.
 
 The speech smoke test uses the same WebSocket client as the app, streams real speech, and waits for final server acknowledgment:
 
@@ -176,6 +197,18 @@ APP_MODE=conversate AI_PROVIDER=codex EXPECT_SUMMARY=1 \
 
 This harness checks the software path using a stubbed native bridge; use the official simulator or physical glasses to verify their microphone and display behavior.
 
+Saved-voice validation uses synthetic voices and a temporary profile store, never the production store:
+
+```sh
+# Fixture generation only: macOS say plus a cached edge-tts installation via uvx.
+.venv/bin/python scripts/test-speaker-recognition-fixtures.py
+.venv/bin/python scripts/test-speaker-recognition-embeddings.py --quality
+# Starts its own loopback server and reloads it to check recall and forgetting.
+.venv/bin/python scripts/test-speaker-recognition.py --port 18773
+```
+
+The managed test refuses an occupied port. `--model-path` supplies an offline TitaNet file, and `--asr-model-path` supplies an offline Whisper model directory. Audio fixtures and detailed results stay under the ignored `.test-output/speaker-recognition` directory. Synthetic voice matching does not establish physical-microphone or real-person identification accuracy.
+
 ## Project layout
 
 | Path | Purpose |
@@ -184,6 +217,7 @@ This harness checks the software path using a stubbed native bridge; use the off
 | `src/main.ts` | Even SDK lifecycle, captions, lens layout, session actions |
 | `src/ui.ts`, `src/settings.ts`, `src/languages.ts` | Phone controls and preferences |
 | `src/conversation.ts`, `src/caption-timing.ts` | AI request lifecycle and caption retention |
+| `src/caption-pager.ts`, `src/speakers.ts` | Stable glasses pages and saved-speaker client types |
 | `server/` | Speech connection adapter and backend-only AI assistance |
 | `scripts/` | Server launch, Mac service installation, speech smoke tests |
 | `tests/` | Protocol, UI, lifecycle, timing, and provider checks |

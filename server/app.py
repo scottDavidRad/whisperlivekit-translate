@@ -1,6 +1,7 @@
 """WhisperLiveKit server with isolated source-language settings per connection."""
 
 import asyncio
+import json
 import logging
 import threading
 from argparse import Namespace
@@ -17,8 +18,10 @@ from whisperlivekit.local_agreement.backends import FasterWhisperASR, MLXWhisper
 
 if __package__:
     from .conversation import ConversationService, conversation_router
+    from .speakers import RecognitionDiarizer, SpeakerService
 else:
     from conversation import ConversationService, conversation_router
+    from speakers import RecognitionDiarizer, SpeakerService
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,7 @@ def create_app(config: WhisperLiveKitConfig) -> FastAPI:
         raise ValueError("Use --diarization-backend sortformer for isolated speaker sessions.")
 
     conversation = ConversationService()
+    speakers = SpeakerService()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -142,6 +146,7 @@ def create_app(config: WhisperLiveKitConfig) -> FastAPI:
             app.state.languages = supported_languages(app.state.engine)
             yield
         finally:
+            await speakers.close()
             await conversation.close()
             if mlx_executor is not None:
                 mlx_executor.shutdown(wait=True, cancel_futures=True)
@@ -192,27 +197,42 @@ def create_app(config: WhisperLiveKitConfig) -> FastAPI:
 
         processor = None
         results_task = None
+        recognition = None
+        send_lock = asyncio.Lock()
+
+        async def send(payload):
+            # Captions, recognition states, and control acknowledgements may be
+            # produced concurrently, but WebSocket writes must be serialized.
+            async with send_lock:
+                await websocket.send_json(payload)
 
         async def send_results(results):
             try:
                 async for response in results:
-                    await websocket.send_json(response.to_dict())
-                await websocket.send_json({"type": "ready_to_stop"})
+                    payload = response.to_dict()
+                    await send(recognition.annotate(payload) if recognition else payload)
+                await send({"type": "ready_to_stop"})
             except WebSocketDisconnect:
                 pass
             except Exception:
                 logger.exception("Failed to deliver transcription results")
                 with suppress(Exception):
-                    await websocket.send_json({"type": "error", "error": "WhisperLiveKit audio processing failed."})
+                    await send({"type": "error", "error": "WhisperLiveKit audio processing failed."})
                     await websocket.close(code=1011)
 
         try:
             engine = session_engine(app.state.engine, language, task)
             processor = AudioProcessor(transcription_engine=engine)
-            results = await processor.create_tasks()
-            await websocket.send_json({
-                "type": "config", "useAudioWorklet": True, **capabilities(language, task),
+            remember = websocket.query_params.get("remember_speakers") == "1" and config.diarization
+            # Announce PCM readiness before optional lazy model loading/state.
+            await send({
+                "type": "config", "useAudioWorklet": True,
+                "speaker_recognition": bool(remember), **capabilities(language, task),
             })
+            recognition = speakers.session(send, enabled=bool(remember))
+            if remember:
+                processor.diarization = RecognitionDiarizer(processor.diarization, recognition)
+            results = await processor.create_tasks()
             results_task = asyncio.create_task(send_results(results))
             while True:
                 message = await websocket.receive()
@@ -220,9 +240,25 @@ def create_app(config: WhisperLiveKitConfig) -> FastAPI:
                     break
                 data = message.get("bytes")
                 if data is None:
-                    await websocket.send_json({"type": "error", "error": "Send 16 kHz mono PCM s16le as binary frames."})
-                    await websocket.close(code=1003)
-                    break
+                    # Speaker controls are nonfatal; malformed text never ends
+                    # an otherwise healthy microphone/caption session.
+                    try:
+                        raw = message.get("text", "")
+                        if len(raw) > 4096:
+                            raise ValueError("Oversized control")
+                        control = json.loads(raw)
+                        if not isinstance(control, dict) or control.get("type") not in {
+                            "speaker_enroll", "speaker_rename", "speaker_forget",
+                        }:
+                            raise ValueError("Unsupported control")
+                        if not recognition.control(control):
+                            await send({"type": "speaker_result", "action": control["type"][8:],
+                                        "request_id": control.get("request_id") if isinstance(control.get("request_id"), str) and len(control["request_id"]) <= 128 else None,
+                                        "ok": False, "message": "A speaker action is still running. Try again shortly."})
+                    except (ValueError, TypeError):
+                        await send({"type": "speaker_result", "action": "enroll", "request_id": None,
+                                    "ok": False, "message": "Invalid speaker control. Send microphone audio as binary PCM."})
+                    continue
                 # Empty binary frames retain WhisperLiveKit's graceful drain.
                 await processor.process_audio(data)
         except WebSocketDisconnect:
@@ -230,9 +266,11 @@ def create_app(config: WhisperLiveKitConfig) -> FastAPI:
         except Exception:
             logger.exception("WhisperLiveKit connection failed")
             with suppress(Exception):
-                await websocket.send_json({"type": "error", "error": "WhisperLiveKit could not process this audio session."})
+                await send({"type": "error", "error": "WhisperLiveKit could not process this audio session."})
                 await websocket.close(code=1011)
         finally:
+            if recognition is not None:
+                await recognition.close()
             if results_task is not None:
                 results_task.cancel()
                 with suppress(asyncio.CancelledError):

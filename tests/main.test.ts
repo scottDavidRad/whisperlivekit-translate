@@ -15,7 +15,7 @@ class FakeSocket extends EventTarget {
   readyState = 0
   bufferedAmount = 0
   binaryType = ''
-  sent: Uint8Array[] = []
+  sent: Array<Uint8Array | string> = []
   constructor(readonly url: string) { super(); FakeSocket.sockets.push(this) }
   config(sourceLanguage?: string) {
     this.readyState = 1
@@ -23,11 +23,11 @@ class FakeSocket extends EventTarget {
     const url = new URL(this.url)
     this.message({ type: 'config', useAudioWorklet: true,
       source_language: sourceLanguage ?? url.searchParams.get('language'),
-      translation_mode: url.searchParams.get('task') === 'translate' ? 'english' : 'transcript' })
+      translation_mode: url.searchParams.get('task') === 'translate' ? 'english' : 'transcript', speaker_recognition: true })
   }
   message(value: unknown) { this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(value) })) }
   transcript(text: string) { this.message({ lines: [{ speaker: 1, text }], buffer_transcription: '' }) }
-  send(data: Uint8Array) { this.sent.push(data.slice()) }
+  send(data: Uint8Array | string) { this.sent.push(data.slice()) }
   close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(new Event('close')) }
 }
 
@@ -152,6 +152,25 @@ test('full app routes SDK audio, session controls, captions, and AI lifecycle', 
       assert.match(lensText(), /Speaker 1:/, 'The next page retains the speaker identity')
     })
 
+    await t.test('names a current voice and updates both phone and glasses from backend recognition', async () => {
+      socket.message({ type: 'speaker_state', status: 'ready', speakers: [{ speaker: 1, seconds: 6 }], profiles: [] })
+      element<HTMLInputElement>('#speaker-name').value = 'John'
+      element<HTMLButtonElement>('#speaker-enroll').click()
+      const request = JSON.parse(socket.sent.filter(item => typeof item === 'string').at(-1) as string)
+      assert.equal(request.type, 'speaker_enroll')
+      assert.equal(request.speaker, 1)
+      assert.equal(request.name, 'John')
+      socket.message({ type: 'speaker_result', action: 'enroll', request_id: request.request_id, ok: true, message: 'Saved John.' })
+      socket.message({ type: 'speaker_state', status: 'ready', speakers: [{ speaker: 1, seconds: 6, name: 'John', profile_id: 'john-profile' }], profiles: [{ id: 'john-profile', name: 'John' }] })
+      socket.transcript('These are fresh confirmed words from the saved voice.')
+      assert.match(phoneText(), /John:/)
+      await until(() => lensText().includes('John:'), 'saved name reaches native glasses caption')
+      assert.match(element('#speaker-message').textContent ?? '', /Saved John/)
+      assert.equal(microphone, true)
+      socket.message({ type: 'speaker_state', status: 'ready', speakers: [{ speaker: 1, seconds: 6 }], profiles: [] })
+      assert.match(phoneText(), /Speaker 1:/, 'forgetting removes the active identity label')
+    })
+
     await t.test('timed captions clear, retained captions stay, and Pause clears only the lens', async () => {
       socket.transcript('First caption remains in the phone history.')
       await until(() => lensText().includes('phone history'), 'caption reaches glasses')
@@ -177,7 +196,7 @@ test('full app routes SDK audio, session controls, captions, and AI lifecycle', 
 
     await t.test('returning from the background keeps final speech and starts new anonymous voice numbering', async () => {
       emit('sysEvent', { eventType: OsEventTypeList.FOREGROUND_EXIT_EVENT })
-      await until(() => !microphone && socket.sent.some(chunk => chunk.byteLength === 0), 'background speech drain begins')
+      await until(() => !microphone && socket.sent.some(chunk => typeof chunk !== 'string' && chunk.byteLength === 0), 'background speech drain begins')
       socket.transcript('Retained caption stays until it is replaced. Final words before leaving.')
       socket.message({ type: 'ready_to_stop' })
       assert.match(phoneText(), /Speaker 1:/)
@@ -257,7 +276,7 @@ test('full app routes SDK audio, session controls, captions, and AI lifecycle', 
       await until(() => pendingCues.length === 2, 'pending cue before End')
       const pending = pendingCues[1]
       emit('sysEvent', { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT })
-      await until(() => !microphone && socket.sent.some(chunk => chunk.byteLength === 0), 'End sends binary finish')
+      await until(() => !microphone && socket.sent.some(chunk => typeof chunk !== 'string' && chunk.byteLength === 0), 'End sends binary finish')
       assert.equal(summaries.length, 0, 'Summary must wait for ready_to_stop')
       assert.equal(pending.signal?.aborted, true)
       pending.resolve(json({ kind: 'suggestion', text: 'LATE CUE AFTER END' }))
@@ -272,10 +291,10 @@ test('full app routes SDK audio, session controls, captions, and AI lifecycle', 
       assert.equal(element('#action-items').children.length, 1)
       assert.equal(element<HTMLButtonElement>('#session-end').disabled, true)
       assert.equal(shutdown, false, 'Ending must leave the phone available for its summary')
-      const finishCount = socket.sent.filter(chunk => chunk.byteLength === 0).length
+      const finishCount = socket.sent.filter(chunk => typeof chunk !== 'string' && chunk.byteLength === 0).length
       emit('sysEvent', { eventType: OsEventTypeList.DOUBLE_CLICK_EVENT })
       await sleep(120)
-      assert.equal(socket.sent.filter(chunk => chunk.byteLength === 0).length, finishCount)
+      assert.equal(socket.sent.filter(chunk => typeof chunk !== 'string' && chunk.byteLength === 0).length, finishCount)
       assert.equal(summaries.length, 1, 'Repeating End must not request another summary')
       assert.ok(callbacks.size > 0, 'The ended phone session stays mounted')
       assert.equal(microphone, false)
@@ -305,7 +324,7 @@ test('full app routes SDK audio, session controls, captions, and AI lifecycle', 
         socket.transcript(`The team will confirm the deadline for ${order}.`)
         const summaryCount = summaries.length
         element<HTMLButtonElement>('#session-end').click()
-        await until(() => !microphone && socket.sent.some(chunk => chunk.byteLength === 0), 'End starts final drain')
+        await until(() => !microphone && socket.sent.some(chunk => typeof chunk !== 'string' && chunk.byteLength === 0), 'End starts final drain')
         const finishSpeech = () => {
           socket.transcript(`The final agreement for ${order} is FINALIZED.`)
           socket.message({ type: 'ready_to_stop' })

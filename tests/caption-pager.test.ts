@@ -198,3 +198,26 @@ test('one narrow row still consumes speech when a continuation label cannot fit'
   assert.ok(output.some(text => text.includes('again')))
   assert.ok(output.length < 6)
 })
+
+
+test('named Russian speakers remain on continued pages without replaying speech', () => {
+  const { pager, output } = setup(2, 20)
+  pager.update('Джон: Hello.\nАнна: These words continue onto another page with more context.')
+  mock.timers.tick(2500)
+  assert.match(output.at(-1)!, /^Анна:/)
+  assert.doesNotMatch(output.at(-1)!, /Hello/)
+  assert.doesNotMatch(output.at(-1)!, /Speaker/)
+})
+
+test('naming multiple earlier turns and appending speech never replays already-read pages', () => {
+  const { pager, output } = setup(1, 80)
+  pager.update('Speaker 1: First read turn.\nSpeaker 2: Current unread turn.\nSpeaker 1: Later return.')
+  mock.timers.tick(2500)
+  assert.equal(output.at(-1), 'Speaker 2: Current unread turn.')
+  pager.update('John: First read turn.\nAnna: Current unread turn.\nJohn: Later return.\nAnna: Fresh speech.')
+  mock.timers.tick(700)
+  assert.equal(output.at(-1), 'Anna: Current unread turn.')
+  assert.equal(output.filter(text => text.includes('First read')).length, 1)
+  mock.timers.tick(2500)
+  assert.equal(output.at(-1), 'John: Later return.')
+})

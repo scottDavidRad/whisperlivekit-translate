@@ -8,7 +8,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { getTextWidth } from '@evenrealities/pretext'
 import { startSttStream, type SttClient } from './asr/stt'
-import { mountUi, setStatus, setTranslation, setOutputMode, setSessionState, setAppMode, setConversationCue, setConversationStatus, setConversationSummary } from './ui'
+import { mountUi, setStatus, setTranslation, setOutputMode, setSessionState, setAppMode, setConversationCue, setConversationStatus, setConversationSummary, setSpeakerState, setSpeakerMessage } from './ui'
 import { CaptionTiming } from './caption-timing'
 import { CaptionPager } from './caption-pager'
 import { ConversationSession, conversationRequest, type ConversationCue, type ConversationConfig, type ConversationSummary } from './conversation'
@@ -372,6 +372,11 @@ let stt: SttClient | null = null
 let streamGeneration = 0
 let streamLive = false
 let micOn = false
+let lastSpeakerNumber = 0
+
+function resetSpeakerUi(message: string) {
+  setSpeakerState({ status: settings.rememberSpeakers ? 'unavailable' : 'disabled', message, speakers: [], profiles: [] })
+}
 
 function isCurrentStream(generation: number) {
   return generation === streamGeneration && !cleanedUp
@@ -395,6 +400,7 @@ function failStream(generation: number, err: unknown) {
   stopMicrophone()
   failed?.close()
   speechDrained = true
+  resetSpeakerUi('Reconnect to manage saved voices. Your saved profiles remain on the backend.')
   setStatus('error', `STT: ${err instanceof Error ? err.message : String(err)}`)
   console.error('STT error:', err)
   if (sessionState === 'ended') void summarizeSession()
@@ -424,6 +430,7 @@ function applySettings() {
   streamLive = false
   stopMicrophone()
   previous?.close()
+  resetSpeakerUi('Start a session to manage saved voices.')
   if (!startupReady || !foreground || sessionState !== 'listening') return
   setSessionState(sessionState)
   setOutputMode(effectiveOutputMode())
@@ -449,7 +456,16 @@ function applySettings() {
         task: effectiveOutputMode() === 'translation' ? 'translate' : 'transcribe',
         splitSentences: settings.splitSentences,
         speakerLabels: settings.speakerLabels,
-        firstSpeaker: Math.max(0, ...previousSpeakerIds) + 1,
+        rememberSpeakers: settings.rememberSpeakers,
+        firstSpeaker: Math.max(lastSpeakerNumber, 0, ...previousSpeakerIds) + 1,
+        onSpeakers(state) {
+          if (!isCurrentStream(generation)) return
+          lastSpeakerNumber = Math.max(lastSpeakerNumber, 0, ...state.speakers.map(speaker => speaker.speaker))
+          setSpeakerState(state)
+        },
+        onSpeakerResult(result) {
+          if (isCurrentStream(generation)) setSpeakerMessage(result.message)
+        },
       },
       ({ finalText, interimText, finished }) => {
         if (!isCurrentStream(generation)) return
@@ -511,7 +527,8 @@ async function handleSave(next: AppSettings) {
     next.sourceLanguage !== prev.sourceLanguage ||
     next.outputMode !== prev.outputMode ||
     next.splitSentences !== prev.splitSentences ||
-    next.speakerLabels !== prev.speakerLabels
+    next.speakerLabels !== prev.speakerLabels ||
+    next.rememberSpeakers !== prev.rememberSpeakers
   const needRestart = sessionState !== 'ended' && (!stt || speechChanged)
 
   try {
@@ -532,6 +549,7 @@ async function handleSave(next: AppSettings) {
       captionPager.reset()
       captionTiming.reset()
       summaryStarted = false
+      lastSpeakerNumber = 0
       setTranslation('', '')
     }
     if (needRebuild || next.maxLines !== prev.maxLines || next.lineGap !== prev.lineGap || next.splitSentences !== prev.splitSentences) {
@@ -611,6 +629,7 @@ function handleSessionAction(action: 'pause' | 'resume' | 'end' | 'start') {
   captionPager.reset()
   captionTiming.reset()
   summaryStarted = false
+  lastSpeakerNumber = 0
   void configureConversation()
   setTranslation('', '')
   setSessionState('listening')
@@ -619,7 +638,16 @@ function handleSessionAction(action: 'pause' | 'resume' | 'end' | 'start') {
   applySettings()
 }
 
-mountUi({ settings, onSave: handleSave, onSessionAction: handleSessionAction, onCueAction: showLatestCue })
+function requestSpeakerAction(action: () => boolean) {
+  if (!stt) { setSpeakerMessage('Start a session to manage saved voices.'); return }
+  if (action()) setSpeakerMessage('Checking voice profile…')
+}
+
+mountUi({ settings, onSave: handleSave, onSessionAction: handleSessionAction, onCueAction: showLatestCue,
+  onSpeakerEnroll: (speaker, name) => requestSpeakerAction(() => stt!.enrollSpeaker(speaker, name)),
+  onSpeakerRename: (id, name) => requestSpeakerAction(() => stt!.renameSpeaker(id, name)),
+  onSpeakerForget: id => requestSpeakerAction(() => stt!.forgetSpeaker(id)),
+})
 void configureConversation()
 
 // Listen before starting either the page or microphone so the first PCM frame

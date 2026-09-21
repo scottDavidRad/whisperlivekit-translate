@@ -1,6 +1,50 @@
 # Verification
 
-This record describes checks performed for the WhisperLiveKit-only fork on September 20, 2026. It distinguishes native desktop simulator, software integration, speech-server, and physical G2 verification.
+This record describes checks performed for the WhisperLiveKit-only fork on September 20–21, 2026. It distinguishes native desktop simulator, software integration, speech-server, and physical G2 verification.
+
+## Version 0.4: saved speaker names
+
+The saved-voice work uses the installed NeMo 3.0.0 stack and public [NVIDIA TitaNet model](https://huggingface.co/nvidia/speakerverification_en_titanet_large). The official checkpoint is **101,621,760 bytes**, producing **192-dimensional** embeddings. No SpeechBrain dependency or external identification service was added.
+
+An initial standalone CPU check used eight-second excerpts from independently synthesized Russian sentences. Enrollment and recall sentences differed. The voices were macOS Milena, Microsoft DmitryNeural, and a third, unenrolled SvetlanaNeural voice. A cached model loaded in **0.33 seconds**; individual embeddings took **0.155–0.170 seconds** with two PyTorch threads. These are embedding-only measurements, not end-to-end caption or identification latency.
+
+| Comparison | Observed cosine similarity |
+|---|---:|
+| Milena across different utterances | 0.940–0.943 |
+| Dmitry across different utterances | 0.898–0.907 |
+| Milena versus Dmitry | 0.214–0.273 |
+| Unknown Svetlana versus enrolled voices | 0.419–0.452 |
+
+The actual production quality gate, using bundled Silero VAD and TitaNet, rejected eight seconds of silence and eight seconds of deterministic white noise. It accepted an eight-second clean Russian Milena sample with a finite 192-dimensional embedding. This check used real models, separately from the mocked filtering unit tests.
+
+The model card documents an English speaker model. These Russian synthetic samples show separation in this small test; they do not calibrate identification across people, languages, microphones, or environments. The app uses explicit naming controls, not spoken naming commands.
+
+The final complete test ran on the **M4 Mac mini**, through an isolated loopback server using the production MLX small/Sortformer models, an offline TitaNet checkpoint, and a temporary profile store. It streamed 16 kHz PCM in real time and exercised the real WebSocket naming controls. All scenarios passed:
+
+- **Live enrollment:** Milena and Dmitry were saved during a 41.61-second Russian conversation. Their names appeared at 7.48 and 22.40 seconds, while audio continued arriving.
+- **Recall after process restart:** a different Russian conversation reversed the speakers' order. Dmitry changed from Speaker 2 to Speaker 1; Milena changed from Speaker 1 to Speaker 2. Both recovered their saved names automatically, including named ASR lines. The returning Dmitry retained his name.
+- **Unknown voice:** a 16.80-second Svetlana recording stayed anonymous while both saved profiles were present.
+- **Rename and forget:** rename succeeded, both profiles were forgotten, the server restarted again, and a known Milena recording remained anonymous with an empty profile list.
+- **Storage:** the two saved records contained only ID, name, and 192-dimensional embedding, with file permissions `0600`. The temporary store was removed afterward; no test names entered the production profile store.
+
+Times below start at WebSocket connection. “First ASR” includes provisional wording; “first confirmed” is server-confirmed text, not a measurement of the physical lens. Completion includes two trailing seconds of silence and final drain.
+
+| Scenario | Recording | First ASR | First confirmed | Completion |
+|---|---:|---:|---:|---:|
+| Enrollment | 41.61 s | 2.74 s | 3.41 s | 45.74 s |
+| Reversed-order recall after restart | 44.55 s | 2.35 s | 2.91 s | 47.54 s |
+| Unknown voice | 16.80 s | 1.55 s | 3.18 s | 19.79 s |
+| Forgotten voice after restart | 13.31 s | 2.34 s | 4.66 s | 18.36 s |
+
+During recall, audio began at **0.06 seconds** while the speaker model was still loading; it became ready at **0.22 seconds**. Anonymous captions preceded both name matches. Dmitry's name appeared at **10.38 seconds** (10.32 seconds after his speech began), and Milena's at **21.39 seconds** (5.81 seconds into her turn). Identification happened during incoming speech, without waiting for End, but it was not immediate.
+
+Retrying an unresolved voice after one additional second of usable audio, instead of four, reduced Dmitry's match time from **13.44 to 10.38 seconds**. The initial four-second minimum, speech/consistency gates, similarity threshold, and ambiguity margin were unchanged. First ASR and final-drain timings stayed essentially unchanged. The earlier unsuccessful attempt's exact cause was not instrumented, so it is not attributed to a particular quality gate or similarity score.
+
+The test used `OMP_NUM_THREADS=2`, `MKL_NUM_THREADS=2`, `OPENBLAS_NUM_THREADS=1`, one-second speech/VAC chunks, and no warm-up recording. The reproducible scripts are `scripts/test-speaker-recognition*.py`; ignored detailed evidence includes `mini-final-verification.json`, `embedding-results.json`, and `embedding-quality-results.json` under `.test-output/speaker-recognition`. This was a real backend test with synthetic recorded speech, not a physical-microphone or glasses identification test.
+
+The version **0.4.0** build passed **87 client tests**, including **16 caption-page tests** and **23 UI tests**, plus **47 Python tests**, TypeScript checking, the Vite build, and packaging. The generic package is **84,893 bytes**; the private installation package is **84,956 bytes**, with SHA-256 `2095eda5567eb836c05e07ecbd2105ae08d6cac7e3901875f99f8dfe816be6a9`. The native simulator's Speakers panel was visually inspected, including the older backend's optional-feature-unavailable fallback. Physical glasses and real-person voice identification remain untested.
+
+The final backend was deployed to the Mac mini's existing private service with the same CPU thread settings and a local offline model file. The production HTTPS health check passed, the secure WebSocket advertised saved-speaker support, the recognition model reached `ready`, and graceful audio drain was acknowledged. Its saved-profile list was empty: synthetic test identities were not deployed. The private installation package is prepared; physical installation still requires access to the user's Even Hub account.
 
 ## Version 0.3.1: steady caption pages
 

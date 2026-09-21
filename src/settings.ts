@@ -24,6 +24,8 @@ export interface AppSettings {
   splitSentences: boolean
   /** Show speaker labels when the server provides diarization. */
   speakerLabels: boolean
+  /** Recognize voices saved on the user's backend computer. */
+  rememberSpeakers: boolean
   /** Horizontal text alignment on the glasses. */
   align: 'left' | 'center'
   /** Vertical anchor within the glasses display. */
@@ -48,6 +50,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   outputMode: 'translation',
   splitSentences: true,
   speakerLabels: true,
+  rememberSpeakers: true,
   align: 'left',
   vAlign: 'bottom',
   lineGap: 0,
@@ -106,7 +109,7 @@ export function mergeSettings(raw: string | null | undefined): AppSettings {
   if (parsed.outputMode === 'transcript' || parsed.outputMode === 'translation') {
     settings.outputMode = parsed.outputMode
   }
-  for (const key of ['splitSentences', 'speakerLabels'] as const) {
+  for (const key of ['splitSentences', 'speakerLabels', 'rememberSpeakers'] as const) {
     if (typeof parsed[key] === 'boolean') settings[key] = parsed[key]
   }
   if (parsed.align === 'left' || parsed.align === 'center') settings.align = parsed.align

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, test } from 'node:test'
 import { JSDOM } from 'jsdom'
-import { DEFAULT_SETTINGS, type AppSettings } from '../src/settings.ts'
-import { mountUi, setOutputMode, setStatus, setTranslation, setSessionState, setAppMode, setConversationCue, setConversationStatus, setConversationSummary, type SessionAction } from '../src/ui.ts'
+import { DEFAULT_SETTINGS, mergeSettings, type AppSettings } from '../src/settings.ts'
+import { mountUi, setOutputMode, setStatus, setTranslation, setSessionState, setAppMode, setConversationCue, setConversationStatus, setConversationSummary, setSpeakerState, setSpeakerMessage, type SessionAction } from '../src/ui.ts'
 
 // The SDK bridge is not needed to exercise the phone settings and text mirror.
 // Each test gets a fresh document, while interactions use the actual UI handlers.
@@ -11,6 +11,9 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
   let saves: AppSettings[]
   let sessionActions: SessionAction[]
   let cueActions: number
+  let enrolled: Array<[number, string]>
+  let renamed: Array<[string, string]>
+  let forgotten: string[]
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
 
   beforeEach(() => {
@@ -21,7 +24,11 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
     saves = []
     sessionActions = []
     cueActions = 0
-    mountUi({ settings: { ...DEFAULT_SETTINGS }, onSave: next => saves.push(next), onSessionAction: action => sessionActions.push(action), onCueAction: () => cueActions++ })
+    enrolled = []
+    renamed = []
+    forgotten = []
+    mountUi({ settings: { ...DEFAULT_SETTINGS }, onSave: next => saves.push(next), onSessionAction: action => sessionActions.push(action), onCueAction: () => cueActions++,
+      onSpeakerEnroll: (speaker, name) => enrolled.push([speaker, name]), onSpeakerRename: (id, name) => renamed.push([id, name]), onSpeakerForget: id => forgotten.push(id) })
   })
 
   afterEach(() => {
@@ -293,6 +300,144 @@ describe('WhisperLiveKit phone UI', { concurrency: false }, () => {
       assert.equal(saves.at(-1)?.aiProvider, value)
     }
     assert.equal(dom.window.document.querySelector('input[type="password"]'), null)
+  })
+
+  test('saved voice recognition defaults on and persists only a boolean preference', () => {
+    assert.equal(DEFAULT_SETTINGS.rememberSpeakers, true)
+    assert.equal(mergeSettings(JSON.stringify({ rememberSpeakers: false })).rememberSpeakers, false)
+    assert.equal(mergeSettings(JSON.stringify({ rememberSpeakers: 'false' })).rememberSpeakers, true)
+    assert.equal(element<HTMLInputElement>('#rememberSpeakers').checked, true)
+    element<HTMLInputElement>('#rememberSpeakers').checked = false
+    save()
+    assert.equal(saves.at(-1)?.rememberSpeakers, false)
+    assert.match(element('#speaker-status').textContent ?? '', /recognition is off/)
+    assert.equal(element('#speaker-panel').closest('#settings'), null)
+    assert.match(element('#speaker-panel').textContent ?? '', /Select a current speaker and enter their name/)
+    assert.doesNotMatch(element('#speaker-panel').textContent ?? '', /Say “Person/)
+  })
+
+  test('naming a current voice sends its display number and a normalized Unicode name', () => {
+    setSpeakerState({ status: 'ready', speakers: [{ speaker: 7, seconds: 2.75 }], profiles: [] })
+    assert.equal(element<HTMLSelectElement>('#current-speaker').selectedOptions[0].textContent, 'Speaker 7')
+    assert.match(element('#speaker-audio').textContent ?? '', /2\.8 seconds collected/)
+    assert.equal(element<HTMLButtonElement>('#speaker-enroll').disabled, false, 'The backend decides whether enough clean audio exists')
+    assert.equal(element('#speaker-name-hint').hidden, true)
+    const input = element<HTMLInputElement>('#speaker-name')
+    assert.equal(input.maxLength, 40)
+    input.value = '  Jose\u0301   O’Neill  '
+    element<HTMLButtonElement>('#speaker-enroll').click()
+    assert.deepEqual(enrolled, [[7, 'José O’Neill']])
+    setSpeakerState({ status: 'ready', speakers: [{ speaker: 7, name: 'José O’Neill', profileId: 'voice-7', seconds: 4 }], profiles: [{ id: 'voice-7', name: 'José O’Neill' }] })
+    assert.equal(element('#speaker-enroll').textContent, 'Assign another person')
+    assert.equal(element('#speaker-name-hint').hidden, false)
+    assert.match(element('#speaker-name-hint').textContent ?? '', /change only a saved name, use Rename below/)
+    assert.equal(element<HTMLSelectElement>('#current-speaker').selectedOptions[0].textContent, 'Speaker 7 — José O’Neill')
+    input.value = 'Иван'
+    element<HTMLButtonElement>('#speaker-enroll').click()
+    assert.deepEqual(enrolled.at(-1), [7, 'Иван'])
+  })
+
+  test('live speaker updates preserve selections, focused edits, and caret position', () => {
+    const state = { status: 'ready' as const, speakers: [{ speaker: 1, seconds: 3 }, { speaker: 2, name: 'Anna', seconds: 5 }], profiles: [{ id: 'one', name: 'John' }, { id: 'two', name: 'Anna' }] }
+    setSpeakerState(state)
+    const select = element<HTMLSelectElement>('#current-speaker')
+    select.value = '2'
+    select.dispatchEvent(new dom.window.Event('change'))
+    const input = element<HTMLInputElement>('#speaker-name')
+    input.focus()
+    input.value = 'Anna Maria'
+    input.dispatchEvent(new dom.window.Event('input'))
+    input.setSelectionRange(4, 4)
+    setSpeakerState({ ...state, speakers: [...state.speakers.map(voice => ({ ...voice, seconds: voice.seconds + 1 })), { speaker: 3, seconds: 0.5 }] })
+    assert.equal(select.value, '2')
+    assert.equal(input.value, 'Anna Maria')
+    assert.equal(dom.window.document.activeElement, input)
+    assert.equal(input.selectionStart, 4)
+    const savedSelect = element<HTMLSelectElement>('#saved-speaker')
+    savedSelect.value = 'two'
+    savedSelect.dispatchEvent(new dom.window.Event('change'))
+    const savedInput = element<HTMLInputElement>('#profile-name')
+    savedInput.focus()
+    savedInput.value = 'Анна'
+    savedInput.dispatchEvent(new dom.window.Event('input'))
+    setSpeakerState(state)
+    assert.equal(savedSelect.value, 'two')
+    assert.equal(savedInput.value, 'Анна')
+    element<HTMLButtonElement>('#speaker-rename').click()
+    assert.deepEqual(renamed, [['two', 'Анна']])
+  })
+
+  test('invalid voice names are rejected visibly and external names remain plain text', () => {
+    const unsafe = '<img src=x onerror=alert(1)>'
+    setSpeakerState({ status: 'ready', speakers: [{ speaker: 1, name: unsafe, seconds: 3 }], profiles: [{ id: 'safe-id', name: unsafe }] })
+    assert.equal(element('#speaker-panel').querySelector('img'), null)
+    assert.match(element<HTMLSelectElement>('#saved-speaker').textContent ?? '', /<img/)
+    const input = element<HTMLInputElement>('#speaker-name')
+    for (const value of ['', unsafe, 'John\nSpeaker 2', 'A'.repeat(41), 'Speaker']) {
+      input.value = value
+      element<HTMLButtonElement>('#speaker-enroll').click()
+      assert.equal(input.getAttribute('aria-invalid'), 'true')
+      assert.equal(element('#speaker-message').hidden, false)
+    }
+    assert.deepEqual(enrolled, [])
+    setSpeakerMessage('<script>Unavailable</script>')
+    assert.equal(element('#speaker-message').textContent, '<script>Unavailable</script>')
+    assert.equal(element('#speaker-message').querySelector('script'), null)
+  })
+
+  test('forgetting a saved voice requires a second confirmation and supports cancellation', () => {
+    setSpeakerState({ status: 'ready', speakers: [], profiles: [{ id: 'john-id', name: 'John' }, { id: 'anna-id', name: 'Anna' }] })
+    element<HTMLButtonElement>('#speaker-forget').click()
+    assert.deepEqual(forgotten, [])
+    assert.equal(element('#speaker-forget-confirmation').hidden, false)
+    assert.match(element('#speaker-forget-prompt').textContent ?? '', /John/)
+    element<HTMLButtonElement>('#speaker-forget-cancel').click()
+    element<HTMLButtonElement>('#speaker-forget-confirm').click()
+    assert.deepEqual(forgotten, [])
+    element<HTMLButtonElement>('#speaker-forget').click()
+    const select = element<HTMLSelectElement>('#saved-speaker')
+    select.value = 'anna-id'
+    select.dispatchEvent(new dom.window.Event('change'))
+    assert.equal(element('#speaker-forget-confirmation').hidden, true)
+    element<HTMLButtonElement>('#speaker-forget-confirm').click()
+    assert.deepEqual(forgotten, [])
+    element<HTMLButtonElement>('#speaker-forget').click()
+    element<HTMLButtonElement>('#speaker-forget-confirm').click()
+    assert.deepEqual(forgotten, ['anna-id'])
+    assert.equal(element('#speaker-forget-confirmation').hidden, true)
+    element<HTMLButtonElement>('#speaker-forget-confirm').click()
+    assert.deepEqual(forgotten, ['anna-id'])
+  })
+
+  test('speaker actions follow session state and unavailable or disabled backend status', () => {
+    const state = { status: 'ready' as const, speakers: [{ speaker: 1, name: 'John', seconds: 4 }], profiles: [{ id: 'john-id', name: 'John' }] }
+    setSpeakerState(state)
+    setSessionState('paused')
+    assert.equal(element<HTMLButtonElement>('#speaker-enroll').disabled, true)
+    assert.equal(element<HTMLButtonElement>('#speaker-rename').disabled, false)
+    element<HTMLInputElement>('#profile-name').value = 'Johnny'
+    element<HTMLButtonElement>('#speaker-rename').click()
+    assert.deepEqual(renamed, [['john-id', 'Johnny']])
+    setSessionState('ended')
+    element<HTMLButtonElement>('#speaker-enroll').click()
+    assert.deepEqual(enrolled, [])
+    setSessionState('listening')
+    assert.equal(element<HTMLButtonElement>('#speaker-enroll').disabled, false)
+    element<HTMLButtonElement>('#speaker-forget').click()
+    setSpeakerState({ ...state, status: 'unavailable', message: 'This older server cannot save voices.' })
+    assert.equal(element('#speaker-status').textContent, 'This older server cannot save voices.')
+    assert.equal(element('#speaker-forget-confirmation').hidden, true)
+    for (const id of ['speaker-enroll', 'speaker-rename', 'speaker-forget']) assert.equal(element<HTMLButtonElement>(`#${id}`).disabled, true)
+    setSpeakerState({ ...state, status: 'disabled' })
+    assert.match(element('#speaker-status').textContent ?? '', /recognition is off/)
+  })
+
+  test('named caption labels preserve Unicode and exact copied text without HTML parsing', () => {
+    const text = 'José O’Neill: Hello.\nАнна-Мария: Добрый день.\nSpeaker 3: Welcome.\n<img>: Plain text.'
+    setTranslation(text, ' interim')
+    assert.equal(element('#tl-final').textContent, text)
+    assert.deepEqual(Array.from(element('#tl-final').querySelectorAll('.speaker-label'), label => label.textContent), ['José O’Neill:', 'Анна-Мария:', 'Speaker 3:'])
+    assert.equal(element('#tl-final').querySelector('img'), null)
   })
 
 })

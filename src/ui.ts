@@ -1,5 +1,6 @@
 import { LANGUAGES, langName } from './languages'
 import { validateServerUrl, type AppSettings, type OutputMode } from './settings'
+import { normalizeSpeakerName, type SpeakerState } from './speakers'
 
 type Status = 'connecting' | 'listening' | 'error' | 'setup' | 'reconnecting'
 export type SessionState = 'listening' | 'paused' | 'ended'
@@ -32,6 +33,8 @@ let summaryTextEl: HTMLElement
 let actionItemsEl: HTMLElement
 let hasSummary = false
 let canShowCue = false
+let speakerState: SpeakerState = { status: 'loading', speakers: [], profiles: [] }
+let renderSpeakerControls = () => {}
 
 const icons = {
   settings: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h8m4 0h6M3 12h2m4 0h12M3 18h12m4 0h2"/><circle cx="13" cy="6" r="2"/><circle cx="7" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>',
@@ -47,9 +50,12 @@ export interface UiHandlers {
   onSave: (next: AppSettings) => void
   onSessionAction: (action: SessionAction) => void
   onCueAction?: () => void
+  onSpeakerEnroll?: (speaker: number, name: string) => void
+  onSpeakerRename?: (profileId: string, name: string) => void
+  onSpeakerForget?: (profileId: string) => void
 }
 
-export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHandlers) {
+export function mountUi({ settings, onSave, onSessionAction, onCueAction, onSpeakerEnroll, onSpeakerRename, onSpeakerForget }: UiHandlers) {
   const app = document.querySelector<HTMLDivElement>('#app')!
   let currentSettings = { ...settings }
   const opt = (n: number, label: string, selected: number) =>
@@ -133,7 +139,9 @@ export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHa
         </div>
         <label class="check"><input id="split" type="checkbox"${settings.splitSentences ? ' checked' : ''}/> Split sentences onto new lines</label>
         <label class="check"><input id="speakers" type="checkbox"${settings.speakerLabels ? ' checked' : ''}/> Identify speakers</label>
-        <p class="hint">Speaker 1, Speaker 2, and pending labels distinguish voices, not people by name.</p>
+        <p class="hint">Unrecognized voices use Speaker 1, Speaker 2, or pending labels.</p>
+        <label class="check"><input id="rememberSpeakers" type="checkbox"${settings.rememberSpeakers ? ' checked' : ''}/> Recognize saved voices</label>
+        <p class="hint">Saved voice profiles stay on the backend computer. Rename or forget them in Speakers below.</p>
         <div id="conversation-settings" hidden>
           <div class="group-title">Conversate</div>
           <div class="field"><label for="aiProvider">AI provider</label><select id="aiProvider">
@@ -175,6 +183,36 @@ export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHa
         </div>
       </section>
 
+      <section id="speaker-panel" class="conversation-panel" aria-label="Speakers">
+        <h2>Speakers</h2>
+        <p class="hint">Select a current speaker and enter their name. Saved voices are matched during future conversations.</p>
+        <p id="speaker-status" class="speaker-status hint" role="status" aria-live="polite"></p>
+        <div class="row">
+          <div class="field"><label for="current-speaker">Current voice</label><select id="current-speaker"></select></div>
+          <div class="field"><label for="speaker-name">Name</label><input id="speaker-name" maxlength="40" autocomplete="off" aria-describedby="speaker-audio speaker-name-hint speaker-message" /></div>
+        </div>
+        <p id="speaker-audio" class="hint"></p>
+        <div class="speaker-actions"><button id="speaker-enroll" class="primary" type="button" disabled>Remember voice</button></div>
+        <p id="speaker-name-hint" class="hint" hidden>To change only a saved name, use Rename below.</p>
+        <h3>Saved voices</h3>
+        <div class="row">
+          <div class="field"><label for="saved-speaker">Voice profile</label><select id="saved-speaker"></select></div>
+          <div class="field"><label for="profile-name">Name</label><input id="profile-name" maxlength="40" autocomplete="off" aria-describedby="speaker-message" /></div>
+        </div>
+        <div class="speaker-actions">
+          <button id="speaker-rename" class="secondary" type="button" disabled>Rename</button>
+          <button id="speaker-forget" class="secondary" type="button" disabled>Forget</button>
+        </div>
+        <div id="speaker-forget-confirmation" class="forget-confirmation" hidden>
+          <p id="speaker-forget-prompt" class="hint"></p>
+          <div class="speaker-actions">
+            <button id="speaker-forget-confirm" class="secondary" type="button">Forget saved voice</button>
+            <button id="speaker-forget-cancel" class="secondary" type="button">Cancel</button>
+          </div>
+        </div>
+        <p id="speaker-message" class="speaker-status hint" role="status" aria-live="polite" hidden></p>
+      </section>
+
       <section id="conversation-summary" class="conversation-panel" aria-label="Conversation summary" hidden>
         <h2>AI Summary</h2><p id="summary-text" class="summary-text"></p>
         <h3 id="action-items-title">Action Items</h3><ul id="action-items"></ul>
@@ -207,6 +245,109 @@ export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHa
   actionItemsEl = $('#action-items')
   hasSummary = false
   canShowCue = Boolean(onCueAction)
+  speakerState = { status: settings.rememberSpeakers ? 'loading' : 'disabled', speakers: [], profiles: [] }
+  const currentSpeakerEl = $<HTMLSelectElement>('#current-speaker')
+  const speakerNameEl = $<HTMLInputElement>('#speaker-name')
+  const savedSpeakerEl = $<HTMLSelectElement>('#saved-speaker')
+  const profileNameEl = $<HTMLInputElement>('#profile-name')
+  const enrollEl = $<HTMLButtonElement>('#speaker-enroll')
+  const renameEl = $<HTMLButtonElement>('#speaker-rename')
+  const forgetEl = $<HTMLButtonElement>('#speaker-forget')
+  const forgetConfirmationEl = $('#speaker-forget-confirmation')
+  let speakerNameEdited = false
+  let profileNameEdited = false
+  let forgetProfileId = ''
+  const dismissForget = () => { forgetProfileId = ''; forgetConfirmationEl.hidden = true }
+  const syncOptions = (select: HTMLSelectElement, entries: Array<{ value: string; text: string }>, empty: string) => {
+    const previous = select.value
+    const choices = entries.length ? entries : [{ value: '', text: empty }]
+    for (const option of Array.from(select.options)) {
+      if (!choices.some(choice => choice.value === option.value)) option.remove()
+    }
+    for (const choice of choices) {
+      let option = Array.from(select.options).find(item => item.value === choice.value)
+      if (!option) { option = document.createElement('option'); option.value = choice.value; select.append(option) }
+      if (option.textContent !== choice.text) option.textContent = choice.text
+    }
+    if (choices.some(choice => choice.value === previous)) select.value = previous
+    return previous !== select.value
+  }
+  const speakersReady = () => currentSettings.rememberSpeakers && speakerState.status === 'ready'
+  renderSpeakerControls = () => {
+    const enabled = currentSettings.rememberSpeakers && speakerState.status !== 'disabled'
+    const ready = speakersReady()
+    const live = ready && sessionState === 'listening'
+    const currentChanged = syncOptions(currentSpeakerEl, speakerState.speakers.map(voice => ({
+      value: String(voice.speaker), text: `Speaker ${voice.speaker}${voice.name ? ` — ${voice.name}` : ''}`,
+    })), 'No current voices')
+    const savedChanged = syncOptions(savedSpeakerEl, speakerState.profiles.map(profile => ({ value: profile.id, text: profile.name })), 'No saved voices')
+    if (currentChanged) speakerNameEdited = false
+    if (savedChanged) { profileNameEdited = false; dismissForget() }
+    const voice = speakerState.speakers.find(item => String(item.speaker) === currentSpeakerEl.value)
+    const profile = speakerState.profiles.find(item => item.id === savedSpeakerEl.value)
+    if (currentChanged || (!speakerNameEdited && document.activeElement !== speakerNameEl)) speakerNameEl.value = voice?.name ?? ''
+    if (savedChanged || (!profileNameEdited && document.activeElement !== profileNameEl)) profileNameEl.value = profile?.name ?? ''
+    currentSpeakerEl.disabled = !live || !voice
+    speakerNameEl.disabled = !live || !voice
+    enrollEl.disabled = !live || !voice || !onSpeakerEnroll
+    enrollEl.textContent = voice?.name ? 'Assign another person' : 'Remember voice'
+    $('#speaker-name-hint').hidden = !voice?.name
+    savedSpeakerEl.disabled = !ready || !profile
+    profileNameEl.disabled = !ready || !profile
+    renameEl.disabled = !ready || !profile || !onSpeakerRename
+    forgetEl.disabled = !ready || !profile || !onSpeakerForget
+    const defaults = { loading: 'Loading saved voices…', ready: voice ? 'Matching saved voices as you speak. Captions continue while matching.' : 'Waiting for a few seconds of clear speech. Captions continue while voices are matched.',
+      disabled: 'Saved voice recognition is off. Enable it in Settings.', unavailable: 'Saved voices are unavailable on this server.' }
+    $('#speaker-status').textContent = !enabled ? defaults.disabled : speakerState.message || defaults[speakerState.status]
+    $('#speaker-audio').textContent = !enabled ? '' : sessionState !== 'listening'
+      ? 'Resume or start a session to name a current voice.'
+      : voice ? `${Math.max(0, Number.isFinite(voice.seconds) ? voice.seconds : 0).toFixed(1)} seconds collected for this voice. Clear, uninterrupted speech helps recognition.`
+        : 'Current voices appear as speech is recognized.'
+    if (!ready || !speakerState.profiles.some(item => item.id === forgetProfileId)) dismissForget()
+  }
+  currentSpeakerEl.addEventListener('change', () => { speakerNameEdited = false; speakerNameEl.value = ''; setSpeakerMessage(''); renderSpeakerControls() })
+  savedSpeakerEl.addEventListener('change', () => { profileNameEdited = false; profileNameEl.value = ''; dismissForget(); setSpeakerMessage(''); renderSpeakerControls() })
+  speakerNameEl.addEventListener('input', () => { speakerNameEdited = true; speakerNameEl.removeAttribute('aria-invalid') })
+  profileNameEl.addEventListener('input', () => { profileNameEdited = true; profileNameEl.removeAttribute('aria-invalid') })
+  const readName = (input: HTMLInputElement) => {
+    const name = normalizeSpeakerName(input.value)
+    if (!name) {
+      input.setAttribute('aria-invalid', 'true')
+      input.focus()
+      setSpeakerMessage('Enter a name of 1–40 letters, with spaces, apostrophes, or hyphens.')
+      return ''
+    }
+    input.value = name
+    if (input === speakerNameEl) speakerNameEdited = true
+    else profileNameEdited = true
+    input.removeAttribute('aria-invalid')
+    setSpeakerMessage('')
+    return name
+  }
+  enrollEl.addEventListener('click', () => {
+    if (enrollEl.disabled) return
+    const name = readName(speakerNameEl)
+    if (name) onSpeakerEnroll?.(Number(currentSpeakerEl.value), name)
+  })
+  renameEl.addEventListener('click', () => {
+    if (renameEl.disabled) return
+    const name = readName(profileNameEl)
+    if (name) onSpeakerRename?.(savedSpeakerEl.value, name)
+  })
+  forgetEl.addEventListener('click', () => {
+    if (forgetEl.disabled) return
+    forgetProfileId = savedSpeakerEl.value
+    const profile = speakerState.profiles.find(item => item.id === forgetProfileId)
+    $('#speaker-forget-prompt').textContent = `Forget the saved voice for ${profile?.name ?? 'this person'}? Future recognition will need a new profile.`
+    forgetConfirmationEl.hidden = false
+  })
+  $<HTMLButtonElement>('#speaker-forget-cancel').addEventListener('click', dismissForget)
+  $<HTMLButtonElement>('#speaker-forget-confirm').addEventListener('click', () => {
+    if (!speakersReady() || !forgetProfileId || !speakerState.profiles.some(item => item.id === forgetProfileId)) return
+    const profileId = forgetProfileId
+    dismissForget()
+    onSpeakerForget?.(profileId)
+  })
   cueButtonEl.addEventListener('click', () => onCueAction?.())
   for (const mode of ['translate', 'conversate'] as const) {
     $<HTMLButtonElement>(`#mode-${mode}`).addEventListener('click', () => {
@@ -274,6 +415,7 @@ export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHa
       outputMode: outputModeEl.value === 'translation' ? 'translation' : 'transcript',
       splitSentences: $<HTMLInputElement>('#split').checked,
       speakerLabels: $<HTMLInputElement>('#speakers').checked,
+      rememberSpeakers: $<HTMLInputElement>('#rememberSpeakers').checked,
       align: $<HTMLSelectElement>('#align').value === 'center' ? 'center' : 'left',
       vAlign: $<HTMLSelectElement>('#valign').value === 'top' ? 'top' : 'bottom',
       lineGap: Number($<HTMLSelectElement>('#linegap').value) || 0,
@@ -281,6 +423,7 @@ export function mountUi({ settings, onSave, onSessionAction, onCueAction }: UiHa
       maxLines: Number($<HTMLSelectElement>('#maxlines').value) || 0,
     }
     currentSettings = next
+    renderSpeakerControls()
     setOutputMode(next.outputMode)
     savedEl.textContent = 'Saved'
     setTimeout(() => (savedEl.textContent = ''), 2000)
@@ -314,7 +457,7 @@ export function setTranslation(finalText: string, interimText: string) {
     if (index) fragment.appendChild(document.createTextNode('\n'))
     const row = document.createElement('p')
     row.className = 'transcript-line'
-    const speaker = line.match(/^(Speaker (?:\d+|pending):)(.*)$/)
+    const speaker = line.match(/^((?:Speaker (?:\d+|pending)|[\p{L}\p{M}][\p{L}\p{M} '\u2019-]{0,39}):)(.*)$/u)
     if (speaker) {
       const label = document.createElement('span')
       label.className = 'speaker-label'
@@ -380,6 +523,7 @@ export function setConversationSummary(summary: string, actionItems: string[]) {
 
 export function setSessionState(state: SessionState) {
   sessionState = state
+  renderSpeakerControls()
   if (!pauseEl) return
   if (state !== 'listening') {
     statusEl.className = 'status'
@@ -392,6 +536,18 @@ export function setSessionState(state: SessionState) {
   const description = emptyEl.querySelector('span')
   if (heading) heading.textContent = state === 'listening' ? 'Listening…' : state === 'paused' ? 'Translation paused' : 'Session ended'
   if (description) description.textContent = state === 'listening' ? 'Speak naturally. Translation appears here.' : state === 'paused' ? 'Resume when you are ready.' : 'Start a new session when you are ready.'
+}
+
+export function setSpeakerState(state: SpeakerState) {
+  speakerState = state
+  renderSpeakerControls()
+}
+
+export function setSpeakerMessage(text: string) {
+  const message = document.querySelector<HTMLElement>('#speaker-message')
+  if (!message) return
+  message.textContent = text
+  message.hidden = !text
 }
 
 async function copyToClipboard(text: string, button: HTMLButtonElement) {
@@ -491,6 +647,11 @@ function injectStyles() {
     .actions { display: flex; align-items: center; gap: 12px; margin-top: 20px; }
     .primary { background: var(--color-accent); border: 0; border-radius: 4px; padding: 10px 24px; min-height: 44px; }
     .primary:hover { filter: brightness(.97); }
+    .secondary { background: var(--color-input); border: 0; border-radius: 4px; padding: 10px 16px; min-height: 44px; }
+    .speaker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .speaker-status { margin: 10px 0 14px !important; }
+    .forget-confirmation { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--color-line); }
+    .forget-confirmation .speaker-actions { margin-top: 10px; }
     .saved { font-size: 13px; color: var(--color-dim); }
     .pane { flex: 1; min-height: 320px; background: var(--color-surface); border-radius: 6px; padding: 16px;
       display: flex; flex-direction: column; }
